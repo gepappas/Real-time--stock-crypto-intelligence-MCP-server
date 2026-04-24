@@ -1,10 +1,12 @@
 """
 FastAPI application: SEO pages + MCP HTTP/JSON-RPC transport.
+v5.2.1 – production‑ready with full SEO enhancements.
 """
 import asyncio
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,34 +21,42 @@ from seo.generator import render_ticker_page, generate_all_symbols
 
 logger = logging.getLogger("api")
 
+# ── Configuration ──────────────────────────────────────────────────────────
+SITE_URL = os.getenv("SITE_URL", "https://revolut-pulse-mcp-v2.up.railway.app").rstrip("/")
+AUTHOR = os.getenv("AUTHOR_NAME", "Revolut Pulse Financial Intelligence")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+OG_IMAGE_URL = os.getenv("OG_IMAGE_URL", "")  # optional
+
 app = FastAPI(
     title="Revolut Pulse MCP v5.2",
-    version="5.2.0",
+    version="5.2.1",
     description="Real-time stock/crypto intelligence + insider tracking MCP server",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-SITE_URL = "https://revolut-pulse-mcp-v2.up.railway.app"
-AUTHOR = "Revolut Pulse Financial Intelligence"
 
-
-# ── HTML helpers ────────────────────────────────────────────────────────────
+# ── HTML helpers ──────────────────────────────────────────────────────────
 
 def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_human = datetime.now().strftime("%B %d, %Y")
     schema = json.dumps({
         "@context": "https://schema.org",
         "@type": "Article",
         "headline": title,
         "description": description,
-        "datePublished": datetime.now().strftime("%Y-%m-%d"),
+        "datePublished": now_iso,
+        "dateModified": now_iso,
         "author": {"@type": "Organization", "name": AUTHOR},
+        "publisher": {"@type": "Organization", "name": AUTHOR},
     })
+    og_image_tag = f'<meta property="og:image" content="{OG_IMAGE_URL}">' if OG_IMAGE_URL else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -56,9 +66,19 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
   <meta name="description" content="{description}">
   <meta name="author" content="{AUTHOR}">
   <meta name="robots" content="index, follow">
+  <link rel="canonical" href="{canonical}">
+  <!-- Open Graph -->
   <meta property="og:title" content="{title}">
   <meta property="og:description" content="{description}">
-  <link rel="canonical" href="{canonical}">
+  <meta property="og:url" content="{canonical}">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Revolut Pulse">
+  {og_image_tag}
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{title}">
+  <meta name="twitter:description" content="{description}">
+  <!-- Schema.org -->
   <script type="application/ld+json">{schema}</script>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem 1.5rem; color: #1a1a2e; }}
@@ -72,11 +92,13 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
 <body>
 {body}
 <footer>
+  <p><strong>Last updated:</strong> {now_human}</p>
   <p>Data sourced from Yahoo Finance, Binance, and SEC EDGAR. Not financial advice.</p>
   <p>
     <a href="/sitemap.xml">Sitemap</a> |
     <a href="/revolut-stocks">All Stocks</a> |
     <a href="/revolut-crypto">Crypto List</a> |
+    <a href="/robots.txt">Robots</a> |
     <a href="/health">Status</a>
   </p>
 </footer>
@@ -84,15 +106,15 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
 </html>"""
 
 
-# ── Health & Status ──────────────────────────────────────────────────────────
+# ── Health & Status ───────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "version": "5.2.0",
+        "version": "5.2.1",
         "tools": 38,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -100,7 +122,7 @@ async def health():
 async def root():
     return JSONResponse({
         "name": "revolut-pulse-mcp",
-        "version": "5.2.0",
+        "version": "5.2.1",
         "tools": 38,
         "prompts": 17,
         "resources": 5,
@@ -111,11 +133,19 @@ async def root():
             "seo_stocks": "/revolut-stocks",
             "seo_crypto": "/revolut-crypto",
             "sitemap": "/sitemap.xml",
+            "robots": "/robots.txt",
         },
     })
 
 
-# ── SEO Pages ────────────────────────────────────────────────────────────────
+@app.get("/robots.txt")
+async def robots():
+    """robots.txt for search engine crawlers."""
+    content = f"User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml"
+    return HTMLResponse(content=content, media_type="text/plain")
+
+
+# ── SEO Pages ─────────────────────────────────────────────────────
 
 @app.get("/revolut-stocks", response_class=HTMLResponse)
 async def revolut_stocks_list():
@@ -128,13 +158,13 @@ async def revolut_stocks_list():
     )
     body = f"""
 <h1>All Stocks &amp; ETFs on Revolut ({len(stocks)})</h1>
-<p>Complete list of equities and exchange-traded funds available to trade on Revolut in 2025.</p>
+<p>Complete list of equities and exchange-traded funds available to trade on Revolut in 2025‑2026.</p>
 <table><thead><tr><th>Ticker</th><th>Name</th><th>Guide</th><th>Compare</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <p><a href="/revolut-crypto">→ View Crypto List</a></p>
 """
     return _seo_wrap(
-        "All Stocks on Revolut 2025 – Complete List",
+        f"All Stocks on Revolut 2025‑2026 – Complete List",
         f"Complete list of {len(stocks)} stocks and ETFs tradeable on Revolut. Updated daily.",
         f"{SITE_URL}/revolut-stocks",
         body,
@@ -152,12 +182,12 @@ async def revolut_crypto_list():
     )
     body = f"""
 <h1>All Cryptocurrencies on Revolut ({len(cryptos)})</h1>
-<p>Full list of crypto assets available to buy and sell on Revolut in 2025.</p>
+<p>Full list of crypto assets available to buy and sell on Revolut in 2025‑2026.</p>
 <ul>{items}</ul>
 <p><a href="/revolut-stocks">→ View Stocks List</a></p>
 """
     return _seo_wrap(
-        "All Crypto on Revolut 2025 – Complete List",
+        f"All Crypto on Revolut 2025‑2026 – Complete List",
         f"Full list of {len(cryptos)} cryptocurrencies tradeable on Revolut. Including BTC, ETH, SOL, XRP.",
         f"{SITE_URL}/revolut-crypto",
         body,
@@ -257,7 +287,7 @@ async def sitemap():
     return HTMLResponse(content=xml, media_type="application/xml")
 
 
-# ── MCP HTTP / JSON-RPC 2.0 ──────────────────────────────────────────────────
+# ── MCP HTTP / JSON-RPC 2.0 ─────────────────────────────────────
 
 @app.get("/mcp/sse")
 async def mcp_sse(request: Request):
@@ -287,7 +317,7 @@ async def mcp_jsonrpc(request: Request):
             rpc["result"] = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                "serverInfo": {"name": "revolut-pulse-mcp", "version": "5.2.0"},
+                "serverInfo": {"name": "revolut-pulse-mcp", "version": "5.2.1"},
             }
         elif method == "tools/list":
             rpc["result"] = {"tools": MCP_TOOLS_SCHEMA}
