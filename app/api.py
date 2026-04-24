@@ -17,18 +17,18 @@ from usecases.trading import get_trading_context
 from usecases.insider import enrich_insider_context
 from domain.services import TradingDecisionEngine
 from infrastructure.providers import revolut, binance, frankfurter
-from seo.generator import render_ticker_page, generate_all_symbols
+from seo.generator import render_page, generate_all_symbols
 
 logger = logging.getLogger("api")
 
 # ── Configuration ──────────────────────────────────────────────────────────
-SITE_URL = os.getenv("SITE_URL", "https://revolut-pulse-mcp-v2.up.railway.app").rstrip("/")
-AUTHOR = os.getenv("AUTHOR_NAME", "Revolut Pulse Financial Intelligence")
+SITE_URL = os.getenv("SITE_URL", "https://mcpize.com/mcp/real-time-stock-crypto-intelligence-mcp-server").rstrip("/")
+AUTHOR = os.getenv("AUTHOR_NAME", "Real-Time Stock & Crypto Intelligence")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
 OG_IMAGE_URL = os.getenv("OG_IMAGE_URL", "")  # optional
 
 app = FastAPI(
-    title="Revolut Pulse MCP v5.2",
+    title="Real-Time Stock & Crypto Intelligence MCP",
     version="5.2.1",
     description="Real-time stock/crypto intelligence + insider tracking MCP server",
 )
@@ -72,7 +72,7 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
   <meta property="og:description" content="{description}">
   <meta property="og:url" content="{canonical}">
   <meta property="og:type" content="article">
-  <meta property="og:site_name" content="Revolut Pulse">
+  <meta property="og:site_name" content="Real-Time Stock &amp; Crypto Intelligence">
   {og_image_tag}
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
@@ -118,10 +118,16 @@ async def health():
     }
 
 
+@app.get("/ping")
+async def ping():
+    """MCPize / Railway startup probe — must respond 200 before traffic is routed."""
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
     return JSONResponse({
-        "name": "revolut-pulse-mcp",
+        "name": "real-time-stock-crypto-intelligence",
         "version": "5.2.1",
         "tools": 38,
         "prompts": 17,
@@ -199,7 +205,7 @@ async def ticker_page(symbol: str):
     sym = symbol.upper()
     ctx = await get_trading_context(sym)
     await enrich_insider_context(ctx)
-    html = render_ticker_page(sym, ctx)
+    html = render_page(sym, ctx)
     return html
 
 
@@ -317,7 +323,7 @@ async def mcp_jsonrpc(request: Request):
             rpc["result"] = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                "serverInfo": {"name": "revolut-pulse-mcp", "version": "5.2.1"},
+                "serverInfo": {"name": "real-time-stock-crypto-intelligence", "version": "5.2.1"},
             }
         elif method == "tools/list":
             rpc["result"] = {"tools": MCP_TOOLS_SCHEMA}
