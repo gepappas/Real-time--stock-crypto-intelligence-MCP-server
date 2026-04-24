@@ -22,7 +22,10 @@ from seo.generator import render_page, generate_all_symbols
 logger = logging.getLogger("api")
 
 # ── Configuration ──────────────────────────────────────────────────────────
-SITE_URL = os.getenv("SITE_URL", "https://mcpize.com/mcp/real-time-stock-crypto-intelligence-mcp-server").rstrip("/")
+SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
+if not SITE_URL:
+    import warnings
+    warnings.warn("SITE_URL env var not set — canonical URLs, sitemap and OG tags will be broken for SEO.")
 AUTHOR = os.getenv("AUTHOR_NAME", "Real-Time Stock & Crypto Intelligence")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
 OG_IMAGE_URL = os.getenv("OG_IMAGE_URL", "")  # optional
@@ -162,15 +165,16 @@ async def revolut_stocks_list():
         f'<td><a href="/revolut-vs-etoro/{k}">vs eToro</a></td></tr>'
         for k, v in stocks
     )
+    year = datetime.now().year
     body = f"""
 <h1>All Stocks &amp; ETFs on Revolut ({len(stocks)})</h1>
-<p>Complete list of equities and exchange-traded funds available to trade on Revolut in 2025‑2026.</p>
+<p>Complete list of equities and exchange-traded funds available to trade on Revolut in {year}.</p>
 <table><thead><tr><th>Ticker</th><th>Name</th><th>Guide</th><th>Compare</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <p><a href="/revolut-crypto">→ View Crypto List</a></p>
 """
     return _seo_wrap(
-        f"All Stocks on Revolut 2025‑2026 – Complete List",
+        f"All Stocks on Revolut {year} – Complete List",
         f"Complete list of {len(stocks)} stocks and ETFs tradeable on Revolut. Updated daily.",
         f"{SITE_URL}/revolut-stocks",
         body,
@@ -186,14 +190,15 @@ async def revolut_crypto_list():
         f'<a href="/revolut-vs-etoro/{c}">vs eToro</a></li>'
         for c in cryptos
     )
+    year = datetime.now().year
     body = f"""
 <h1>All Cryptocurrencies on Revolut ({len(cryptos)})</h1>
-<p>Full list of crypto assets available to buy and sell on Revolut in 2025‑2026.</p>
+<p>Full list of crypto assets available to buy and sell on Revolut in {year}.</p>
 <ul>{items}</ul>
 <p><a href="/revolut-stocks">→ View Stocks List</a></p>
 """
     return _seo_wrap(
-        f"All Crypto on Revolut 2025‑2026 – Complete List",
+        f"All Crypto on Revolut {year} – Complete List",
         f"Full list of {len(cryptos)} cryptocurrencies tradeable on Revolut. Including BTC, ETH, SOL, XRP.",
         f"{SITE_URL}/revolut-crypto",
         body,
@@ -239,7 +244,7 @@ async def guide_page(symbol: str):
 <p><a href="/ticker/{sym}">← Back to {sym} overview</a> | <a href="/revolut-vs-etoro/{sym}">Compare with eToro →</a></p>
 """
     return _seo_wrap(
-        f"How to Buy {sym} on Revolut – Step-by-Step Guide 2025",
+        f"How to Buy {sym} on Revolut – Step-by-Step Guide {datetime.now().year}",
         f"Step-by-step guide to buying {sym} ({name}) on Revolut. Fees, availability, and tips.",
         f"{SITE_URL}/guide/{sym}",
         body,
@@ -252,8 +257,9 @@ async def comparison_page(symbol: str):
     ctx = await get_trading_context(sym)
     on_rev = TradingDecisionEngine.is_tradable_on(ctx, "revolut")
     price = f"${ctx.prices[0].value:,.2f}" if ctx.prices else "N/A"
+    year = datetime.now().year
     body = f"""
-<h1>{sym}: Revolut vs eToro – Which is Better in 2025?</h1>
+<h1>{sym}: Revolut vs eToro – Which is Better in {year}?</h1>
 <p>Current price: <strong>{price}</strong></p>
 <table>
 <tr><th>Feature</th><th>Revolut</th><th>eToro</th></tr>
@@ -270,7 +276,7 @@ async def comparison_page(symbol: str):
 <p><a href="/guide/{sym}">← Revolut guide for {sym}</a> | <a href="/ticker/{sym}">Live data →</a></p>
 """
     return _seo_wrap(
-        f"Revolut vs eToro for {sym} – Fees, Availability & Comparison 2025",
+        f"Revolut vs eToro for {sym} – Fees, Availability & Comparison {year}",
         f"Compare Revolut and eToro for trading {sym}. Fees, features, and which platform to use.",
         f"{SITE_URL}/revolut-vs-etoro/{sym}",
         body,
@@ -279,7 +285,7 @@ async def comparison_page(symbol: str):
 
 @app.get("/sitemap.xml")
 async def sitemap():
-    symbols = generate_all_symbols()[:150]
+    symbols = generate_all_symbols()
     today = datetime.now().strftime("%Y-%m-%d")
     urls = (
         f"<url><loc>{SITE_URL}/revolut-stocks</loc><lastmod>{today}</lastmod><changefreq>daily</changefreq></url>"
