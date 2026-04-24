@@ -1,0 +1,25 @@
+# Core MCP + API
+fastmcp>=2.0.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+
+# HTTP clients
+httpx>=0.28.0
+
+# HTML parsing (SEC EDGAR fallback)
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# Crypto (Revolut Open Banking mTLS)
+pynacl>=1.5.0
+
+# Cache
+redis>=5.0.0
+
+# Database (SaaS layer — optional, falls back to SQLite)
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+aiosqlite>=0.20.0
+
+# Utils
+python-dotenv>=1.0.0

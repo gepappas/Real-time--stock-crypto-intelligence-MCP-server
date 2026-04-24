@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "revolut-pulse-mcp": {
+      "command": "python",
+      "args": ["main.py"],
+      "cwd": "/path/to/revolut-pulse-mcp",
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "REDIS_URL": "redis://localhost:6379"
+      }
+    }
+  }
+}
