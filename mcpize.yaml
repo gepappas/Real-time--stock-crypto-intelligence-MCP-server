@@ -1,0 +1,68 @@
+version: 1
+name: real-time-stock-crypto-intelligence
+description: >
+  Real-time stock & crypto intelligence MCP server — 38 tools, 17 prompts,
+  5 resources. Live market data from Yahoo Finance, Binance & SEC EDGAR.
+  No API keys required for market data. Insider cluster detection, CEO/CFO
+  trade alerts, and Revolut banking integration included.
+runtime: python
+entry: main.py
+
+build:
+  install: pip install -r requirements.txt
+
+startCommand:
+  type: http
+  command: python main.py
+
+secrets:
+  - name: PORT
+    required: false
+    description: "Server port (default: 8080)"
+
+  - name: MCPRICE_API_KEYS
+    required: false
+    description: "Comma-separated API keys for server auth (optional in free tier)"
+
+  - name: REDIS_URL
+    required: false
+    description: "Redis connection URL for response caching (optional — in-memory fallback used if absent)"
+
+  - name: MCPRICE_ALERT_WEBHOOK
+    required: false
+    description: "Webhook URL to receive price & insider trade alerts"
+
+  # ── Revolut Open Banking (optional) ─────────────────────────────────────
+  - name: REVOLUT_ENV
+    required: false
+    description: "Revolut Open Banking environment: sandbox | production"
+
+  - name: REVOLUT_CLIENT_ID
+    required: false
+    description: "Revolut Open Banking OAuth2 client ID"
+
+  - name: REVOLUT_CERT_PATH
+    required: false
+    description: "Path to Revolut transport certificate (.pem)"
+
+  - name: REVOLUT_KEY_PATH
+    required: false
+    description: "Path to Revolut private key file"
+
+  # ── Revolut X Crypto Trading (optional) ─────────────────────────────────
+  - name: REVOLUT_X_API_KEY
+    required: false
+    description: "Revolut X crypto trading API key"
+
+  - name: REVOLUT_X_PRIVATE_KEY
+    required: false
+    description: "Base64-encoded Ed25519 private key for Revolut X request signing (requires pynacl)"
+
+  # ── Revolut Unofficial Personal API (optional) ──────────────────────────
+  - name: REVOLUT_DEVICE_ID
+    required: false
+    description: "Device ID for Revolut unofficial personal API (pockets/vaults)"
+
+  - name: REVOLUT_PHONE_TOKEN
+    required: false
+    description: "Phone token for Revolut unofficial personal API"
