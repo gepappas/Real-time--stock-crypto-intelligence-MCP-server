@@ -15,6 +15,7 @@ startCommand:
   type: http
   command: python main.py
 
+# ── Publisher secrets (your infrastructure — set once in MCPize dashboard) ──
 secrets:
   - name: PORT
     required: false
@@ -32,37 +33,69 @@ secrets:
     required: false
     description: "Webhook URL to receive price & insider trade alerts"
 
-  # ── Revolut Open Banking (optional) ─────────────────────────────────────
-  - name: REVOLUT_ENV
-    required: false
-    description: "Revolut Open Banking environment: sandbox | production"
+  - name: SITE_URL
+    required: true
+    description: "Public base URL of this deployment — used for canonical tags, sitemap, and OG metadata"
 
+# ── Per-user credentials (each subscriber supplies their own Revolut keys) ──
+credentials_mode: per_user
+
+credentials:
+  # ── Revolut Open Banking ────────────────────────────────────────────────
   - name: REVOLUT_CLIENT_ID
     required: false
     description: "Revolut Open Banking OAuth2 client ID"
+    docs_url: "https://developer.revolut.com/docs/guides/manage-accounts/get-started/register-your-application"
+    mapping:
+      env: REVOLUT_CLIENT_ID
+
+  - name: REVOLUT_ENV
+    required: false
+    description: "Revolut Open Banking environment: sandbox | production"
+    docs_url: "https://developer.revolut.com/docs/guides/manage-accounts/get-started/register-your-application"
+    mapping:
+      env: REVOLUT_ENV
 
   - name: REVOLUT_CERT_PATH
     required: false
-    description: "Path to Revolut transport certificate (.pem)"
+    description: "Path to Revolut transport certificate (.pem) — upload via MCPize secrets"
+    docs_url: "https://developer.revolut.com/docs/guides/manage-accounts/get-started/register-your-application"
+    mapping:
+      env: REVOLUT_CERT_PATH
 
   - name: REVOLUT_KEY_PATH
     required: false
-    description: "Path to Revolut private key file"
+    description: "Path to Revolut private key — upload via MCPize secrets"
+    docs_url: "https://developer.revolut.com/docs/guides/manage-accounts/get-started/register-your-application"
+    mapping:
+      env: REVOLUT_KEY_PATH
 
-  # ── Revolut X Crypto Trading (optional) ─────────────────────────────────
+  # ── Revolut X Crypto Trading ────────────────────────────────────────────
   - name: REVOLUT_X_API_KEY
     required: false
     description: "Revolut X crypto trading API key"
+    docs_url: "https://developer.revolut.com/docs/guides/trading/get-started"
+    mapping:
+      env: REVOLUT_X_API_KEY
 
   - name: REVOLUT_X_PRIVATE_KEY
     required: false
-    description: "Base64-encoded Ed25519 private key for Revolut X request signing (requires pynacl)"
+    description: "Base64-encoded Ed25519 private key for Revolut X request signing"
+    docs_url: "https://developer.revolut.com/docs/guides/trading/get-started"
+    mapping:
+      env: REVOLUT_X_PRIVATE_KEY
 
-  # ── Revolut Unofficial Personal API (optional) ──────────────────────────
+  # ── Revolut Unofficial Personal API ────────────────────────────────────
   - name: REVOLUT_DEVICE_ID
     required: false
-    description: "Device ID for Revolut unofficial personal API (pockets/vaults)"
+    description: "Device ID for Revolut personal API (pockets/vaults access)"
+    docs_url: "https://github.com/gepappas/Real-time--stock-crypto-intelligence-MCP-server#configuration"
+    mapping:
+      env: REVOLUT_DEVICE_ID
 
   - name: REVOLUT_PHONE_TOKEN
     required: false
-    description: "Phone token for Revolut unofficial personal API"
+    description: "Phone token for Revolut personal API"
+    docs_url: "https://github.com/gepappas/Real-time--stock-crypto-intelligence-MCP-server#configuration"
+    mapping:
+      env: REVOLUT_PHONE_TOKEN
