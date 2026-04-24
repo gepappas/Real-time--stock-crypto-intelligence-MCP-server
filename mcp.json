@@ -1,12 +1,11 @@
 {
   "mcpServers": {
-    "revolut-pulse-mcp": {
+    "real-time-stock-crypto-intelligence": {
       "command": "python",
       "args": ["main.py"],
-      "cwd": "/path/to/revolut-pulse-mcp",
+      "cwd": "/path/to/Real-time--stock-crypto-intelligence-MCP-server",
       "env": {
-        "MCP_TRANSPORT": "stdio",
-        "REDIS_URL": "redis://localhost:6379"
+        "MCP_TRANSPORT": "stdio"
       }
     }
   }
