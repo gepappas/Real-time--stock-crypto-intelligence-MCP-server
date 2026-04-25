@@ -22,8 +22,11 @@ USER revolut
 
 EXPOSE 8080
 
+# Cloud Run / Railway use their own health probes (GET /ping or GET /health).
+# This Docker HEALTHCHECK is ignored by Cloud Run but useful for local dev.
+# Aligned to hit /ping (same as Cloud Run startup probe) instead of /health.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8080}/ping || exit 1
 
 ENV MCP_TRANSPORT=http
 ENV PORT=8080

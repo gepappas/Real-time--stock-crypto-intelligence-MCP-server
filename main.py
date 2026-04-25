@@ -1,14 +1,13 @@
 """
-real-time-stock-crypto-intelligence v5.2 — Dual Transport Entry Point
+real-time-stock-crypto-intelligence v5.2.2 — Dual Transport Entry Point
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  stdio  →  MCP protocol (Claude Desktop, Smithery, MCPize)
-  http   →  FastAPI + SEO pages (Railway / Cloud Run)
+ stdio → MCP protocol (Claude Desktop, Smithery, MCPize)
+ http → FastAPI + SEO pages (Railway / Cloud Run / Fly.io)
 
-TOOLS_MODE=market   → 19 market-intelligence tools (free tier)
-TOOLS_MODE=revolut  → 19 banking/trading tools     (paid tier)
-TOOLS_MODE=all      → all 38 tools                 (local dev)
-
-Set env var:  MCP_TRANSPORT=stdio | http   (default: stdio)
+FIXES in v5.2.2:
+- Database init moved to FastAPI lifespan (non-blocking, runs once)
+- Version bumped to 5.2.2 across all modules
+- Cleaner shutdown handling
 """
 import asyncio
 import logging
@@ -25,28 +24,12 @@ logger = logging.getLogger("market-data-intelligence")
 
 def _run_http():
     import uvicorn
-    from app.api import app
-
+    # DB init is now handled in FastAPI lifespan event (app/api.py)
+    # so it runs asynchronously without blocking the main thread.
     port = int(os.getenv("PORT", "8080"))
     host = os.getenv("HOST", "0.0.0.0")
     workers = int(os.getenv("WEB_CONCURRENCY", "1"))
     logger.info("Starting HTTP server on %s:%d (%d worker(s))", host, port, workers)
-
-    # Optional: init DB and seed billing plans
-    try:
-        from saas.database import engine, Base
-        from saas.billing import seed_plans
-
-        async def _init_db():
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            await seed_plans()
-
-        asyncio.run(_init_db())
-        logger.info("Database initialised and billing plans seeded")
-    except Exception as exc:
-        logger.warning("Database init skipped: %s", exc)
-
     uvicorn.run(
         "app.api:app",
         host=host,
