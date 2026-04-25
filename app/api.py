@@ -1,11 +1,13 @@
 """
 FastAPI application: SEO pages + MCP HTTP/JSON-RPC transport.
-v5.2.1 – production‑ready with full SEO enhancements.
+v5.2.2 – CRITICAL FIXES: sitemap XML, HTML wrapper, viewport, error handling, OG image.
 """
 import asyncio
 import json
 import logging
 import os
+import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,12 +30,28 @@ if not SITE_URL:
     warnings.warn("SITE_URL env var not set — canonical URLs, sitemap and OG tags will be broken for SEO.")
 AUTHOR = os.getenv("AUTHOR_NAME", "Real-Time Stock & Crypto Intelligence")
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
-OG_IMAGE_URL = os.getenv("OG_IMAGE_URL", "")  # optional
+OG_IMAGE_URL = os.getenv("OG_IMAGE_URL", "")
+
+# ── Lifespan: init DB once, non-blocking ──────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        from saas.database import engine, Base
+        from saas.billing import seed_plans
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await seed_plans()
+        logger.info("Database initialised and billing plans seeded")
+    except Exception as exc:
+        logger.warning("Database init skipped: %s", exc)
+    yield
+    logger.info("Shutting down")
 
 app = FastAPI(
     title="Real-Time Stock & Crypto Intelligence MCP",
-    version="5.2.1",
+    version="5.2.2",
     description="Real-time stock/crypto intelligence + insider tracking MCP server",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -42,7 +60,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
 
 # ── HTML helpers ──────────────────────────────────────────────────────────
 
@@ -59,55 +76,50 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
         "author": {"@type": "Organization", "name": AUTHOR},
         "publisher": {"@type": "Organization", "name": AUTHOR},
     })
-    og_image_tag = f'<meta property="og:image" content="{OG_IMAGE_URL}">' if OG_IMAGE_URL else ""
+    og_image_tag = f'\n    <meta property="og:image" content="{OG_IMAGE_URL}">\n    <meta property="og:image:width" content="1200">\n    <meta property="og:image:height" content="630">' if OG_IMAGE_URL else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
-  <meta name="description" content="{description}">
-  <meta name="author" content="{AUTHOR}">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="{canonical}">
-  <!-- Open Graph -->
-  <meta property="og:title" content="{title}">
-  <meta property="og:description" content="{description}">
-  <meta property="og:url" content="{canonical}">
-  <meta property="og:type" content="article">
-  <meta property="og:site_name" content="Real-Time Stock &amp; Crypto Intelligence">
-  {og_image_tag}
-  <!-- Twitter Card -->
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{title}">
-  <meta name="twitter:description" content="{description}">
-  <!-- Schema.org -->
-  <script type="application/ld+json">{schema}</script>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem 1.5rem; color: #1a1a2e; }}
-    h1 {{ color: #16213e; }} h2 {{ color: #0f3460; }}
-    a {{ color: #e94560; }} table {{ border-collapse: collapse; width: 100%; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background: #16213e; color: white; }}
-    footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #ddd; font-size: 0.85rem; color: #666; }}
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>{title}</title>
+    <meta name="description" content="{description}">
+    <meta name="author" content="{AUTHOR}">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+    <link rel="canonical" href="{canonical}">
+    <meta property="og:title" content="{title}">
+    <meta property="og:description" content="{description}">
+    <meta property="og:url" content="{canonical}">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="{AUTHOR}">{og_image_tag}
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{title}">
+    <meta name="twitter:description" content="{description}">
+    {f'<meta name="twitter:image" content="{OG_IMAGE_URL}">' if OG_IMAGE_URL else ""}
+    <script type="application/ld+json">
+    {schema}
+    </script>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 768px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #f8fafc; background: #0f172a; }}
+        h1, h2 {{ color: #38bdf8; }}
+        a {{ color: #38bdf8; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; }}
+        th, td {{ border: 1px solid #334155; padding: 0.5rem; text-align: left; }}
+        th {{ background: #1e293b; }}
+        .muted {{ color: #94a3b8; font-size: 0.9rem; }}
+        footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #334155; font-size: 0.85rem; color: #94a3b8; }}
+    </style>
 </head>
 <body>
 {body}
 <footer>
-  <p><strong>Last updated:</strong> {now_human}</p>
-  <p>Data sourced from Yahoo Finance, Binance, and SEC EDGAR. Not financial advice.</p>
-  <p>
-    <a href="/sitemap.xml">Sitemap</a> |
-    <a href="/revolut-stocks">All Stocks</a> |
-    <a href="/revolut-crypto">Crypto List</a> |
-    <a href="/robots.txt">Robots</a> |
-    <a href="/health">Status</a>
-  </p>
+    <p>Last updated: <time datetime="{now_iso}">{now_human}</time></p>
+    <p>Data from Yahoo Finance, Binance, SEC EDGAR. Not financial advice.</p>
+    <p><a href="{SITE_URL}/sitemap.xml">Sitemap</a> · <a href="{SITE_URL}/revolut-stocks">All Stocks</a></p>
 </footer>
 </body>
 </html>"""
-
 
 # ── Health & Status ───────────────────────────────────────────────
 
@@ -115,23 +127,21 @@ def _seo_wrap(title: str, description: str, canonical: str, body: str) -> str:
 async def health():
     return {
         "status": "ok",
-        "version": "5.2.1",
+        "version": "5.2.2",
         "tools": 38,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-
 @app.get("/ping")
 async def ping():
-    """MCPize / Railway startup probe — must respond 200 before traffic is routed."""
+    """MCPize / Railway / Cloud Run startup probe — must respond 200 before traffic is routed."""
     return {"status": "ok"}
-
 
 @app.get("/")
 async def root():
     return JSONResponse({
         "name": "real-time-stock-crypto-intelligence",
-        "version": "5.2.1",
+        "version": "5.2.2",
         "tools": 38,
         "prompts": 17,
         "resources": 5,
@@ -146,13 +156,11 @@ async def root():
         },
     })
 
-
 @app.get("/robots.txt")
 async def robots():
     """robots.txt for search engine crawlers."""
     content = f"User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml"
     return HTMLResponse(content=content, media_type="text/plain")
-
 
 # ── SEO Pages ─────────────────────────────────────────────────────
 
@@ -160,18 +168,18 @@ async def robots():
 async def revolut_stocks_list():
     stocks = sorted(revolut.REVOLUT_STOCKS.items())
     rows = "".join(
-        f'<tr><td><a href="/ticker/{k}">{k}</a></td><td>{v}</td>'
-        f'<td><a href="/guide/{k}">Buying Guide</a></td>'
-        f'<td><a href="/revolut-vs-etoro/{k}">vs eToro</a></td></tr>'
+        f'<tr><td><strong>{k}</strong></td><td>{v}</td><td><a href="{SITE_URL}/guide/{k}">Guide</a></td><td><a href="{SITE_URL}/revolut-vs-etoro/{k}">vs eToro</a></td></tr>'
         for k, v in stocks
     )
     year = datetime.now().year
     body = f"""
-<h1>All Stocks &amp; ETFs on Revolut ({len(stocks)})</h1>
-<p>Complete list of equities and exchange-traded funds available to trade on Revolut in {year}.</p>
-<table><thead><tr><th>Ticker</th><th>Name</th><th>Guide</th><th>Compare</th></tr></thead>
-<tbody>{rows}</tbody></table>
-<p><a href="/revolut-crypto">→ View Crypto List</a></p>
+<h1>All Stocks & ETFs on Revolut ({len(stocks)})</h1>
+<p class="muted">Complete list of equities and exchange-traded funds available to trade on Revolut in {year}.</p>
+<table>
+<thead><tr><th>Ticker</th><th>Name</th><th>Guide</th><th>Compare</th></tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<p><a href="{SITE_URL}/revolut-crypto">→ View Crypto List</a></p>
 """
     return _seo_wrap(
         f"All Stocks on Revolut {year} – Complete List",
@@ -180,22 +188,19 @@ async def revolut_stocks_list():
         body,
     )
 
-
 @app.get("/revolut-crypto", response_class=HTMLResponse)
 async def revolut_crypto_list():
     cryptos = sorted(revolut.REVOLUT_CRYPTO)
     items = "".join(
-        f'<li><a href="/ticker/{c}">{c}</a> — '
-        f'<a href="/guide/{c}">How to Buy</a> | '
-        f'<a href="/revolut-vs-etoro/{c}">vs eToro</a></li>'
+        f'<li><strong>{c}</strong> — <a href="{SITE_URL}/guide/{c}">How to Buy</a> · <a href="{SITE_URL}/revolut-vs-etoro/{c}">vs eToro</a></li>'
         for c in cryptos
     )
     year = datetime.now().year
     body = f"""
 <h1>All Cryptocurrencies on Revolut ({len(cryptos)})</h1>
-<p>Full list of crypto assets available to buy and sell on Revolut in {year}.</p>
+<p class="muted">Full list of crypto assets available to buy and sell on Revolut in {year}.</p>
 <ul>{items}</ul>
-<p><a href="/revolut-stocks">→ View Stocks List</a></p>
+<p><a href="{SITE_URL}/revolut-stocks">→ View Stocks List</a></p>
 """
     return _seo_wrap(
         f"All Crypto on Revolut {year} – Complete List",
@@ -204,28 +209,39 @@ async def revolut_crypto_list():
         body,
     )
 
-
 @app.get("/ticker/{symbol}", response_class=HTMLResponse)
 async def ticker_page(symbol: str):
     sym = symbol.upper()
-    ctx = await get_trading_context(sym)
-    await enrich_insider_context(ctx)
-    html = render_page(sym, ctx)
+    # Validate ticker format to prevent injection / junk requests
+    if not re.fullmatch(r"[A-Z0-9\-\.]{1,20}", sym):
+        raise HTTPException(status_code=400, detail="Invalid ticker format")
+    try:
+        ctx = await get_trading_context(sym)
+        await enrich_insider_context(ctx)
+    except Exception as exc:
+        logger.exception("Failed to build trading context for %s", sym)
+        raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {sym}")
+    html = render_page(sym, ctx, site_url=SITE_URL)
     return html
-
 
 @app.get("/guide/{symbol}", response_class=HTMLResponse)
 async def guide_page(symbol: str):
     sym = symbol.upper()
-    ctx = await get_trading_context(sym)
+    if not re.fullmatch(r"[A-Z0-9\-\.]{1,20}", sym):
+        raise HTTPException(status_code=400, detail="Invalid ticker format")
+    try:
+        ctx = await get_trading_context(sym)
+    except Exception as exc:
+        logger.exception("Failed to build guide context for %s", sym)
+        raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {sym}")
     on_rev = TradingDecisionEngine.is_tradable_on(ctx, "revolut")
     name = (ctx.prices[0].name if ctx.prices and ctx.prices[0].name else sym)
-    price = f"${ctx.prices[0].value:,.2f}" if ctx.prices else "N/A"
+    price = f"${ctx.prices[0].value:,.2f}" if ctx.prices and ctx.prices[0].value else "N/A"
     avail = "✅ Available" if on_rev else "❌ Not available"
     body = f"""
 <h1>How to Buy {sym} on Revolut</h1>
-<p><strong>Status:</strong> {avail} | <strong>Current Price:</strong> {price}</p>
-{'<p>✅ <strong>' + name + '</strong> is listed on Revolut and can be traded directly in the app.</p>' if on_rev else '<p>❌ <strong>' + sym + '</strong> is not currently available on Revolut. Consider eToro or Binance as alternatives.</p>'}
+<p><strong>Status:</strong> {avail} · <strong>Current Price:</strong> {price}</p>
+{"<p>✅ <strong>" + name + "</strong> is listed on Revolut and can be traded directly in the app.</p>" if on_rev else "<p>❌ <strong>" + sym + "</strong> is not currently available on Revolut. Consider eToro or Binance as alternatives.</p>"}
 <h2>Step 1: Open a Revolut Account</h2>
 <p>Download the Revolut app (iOS/Android) and complete KYC verification.</p>
 <h2>Step 2: Deposit Funds</h2>
@@ -236,12 +252,14 @@ async def guide_page(symbol: str):
 <p>Choose amount, confirm, done. Fractional shares from $1.</p>
 <h2>Revolut Trading Fees</h2>
 <table>
-<tr><th>Plan</th><th>Fee</th><th>Monthly FX Limit</th></tr>
+<thead><tr><th>Plan</th><th>Fee</th><th>Monthly FX Limit</th></tr></thead>
+<tbody>
 <tr><td>Standard</td><td>1.49%</td><td>£1,000 free</td></tr>
 <tr><td>Premium</td><td>0.49%</td><td>£10,000 free</td></tr>
 <tr><td>Metal</td><td>0%</td><td>Unlimited</td></tr>
+</tbody>
 </table>
-<p><a href="/ticker/{sym}">← Back to {sym} overview</a> | <a href="/revolut-vs-etoro/{sym}">Compare with eToro →</a></p>
+<p><a href="{SITE_URL}/ticker/{sym}">← Back to {sym} overview</a> · <a href="{SITE_URL}/revolut-vs-etoro/{sym}">Compare with eToro →</a></p>
 """
     return _seo_wrap(
         f"How to Buy {sym} on Revolut – Step-by-Step Guide {datetime.now().year}",
@@ -250,30 +268,37 @@ async def guide_page(symbol: str):
         body,
     )
 
-
 @app.get("/revolut-vs-etoro/{symbol}", response_class=HTMLResponse)
 async def comparison_page(symbol: str):
     sym = symbol.upper()
-    ctx = await get_trading_context(sym)
+    if not re.fullmatch(r"[A-Z0-9\-\.]{1,20}", sym):
+        raise HTTPException(status_code=400, detail="Invalid ticker format")
+    try:
+        ctx = await get_trading_context(sym)
+    except Exception as exc:
+        logger.exception("Failed to build comparison context for %s", sym)
+        raise HTTPException(status_code=503, detail=f"Data temporarily unavailable for {sym}")
     on_rev = TradingDecisionEngine.is_tradable_on(ctx, "revolut")
-    price = f"${ctx.prices[0].value:,.2f}" if ctx.prices else "N/A"
+    price = f"${ctx.prices[0].value:,.2f}" if ctx.prices and ctx.prices[0].value else "N/A"
     year = datetime.now().year
     body = f"""
 <h1>{sym}: Revolut vs eToro – Which is Better in {year}?</h1>
 <p>Current price: <strong>{price}</strong></p>
 <table>
-<tr><th>Feature</th><th>Revolut</th><th>eToro</th></tr>
-<tr><td>Availability</td><td>{'✅ Yes' if on_rev else '❌ No'}</td><td>✅ Yes</td></tr>
+<thead><tr><th>Feature</th><th>Revolut</th><th>eToro</th></tr></thead>
+<tbody>
+<tr><td>Availability</td><td>{"✅ Yes" if on_rev else "❌ No"}</td><td>✅ Yes</td></tr>
 <tr><td>Trading Fee</td><td>0–1.49% (plan-based)</td><td>0% commission</td></tr>
 <tr><td>Fractional Shares</td><td>✅ From $1</td><td>✅ From $10</td></tr>
 <tr><td>Crypto Support</td><td>✅ 60+ coins</td><td>✅ 70+ coins</td></tr>
 <tr><td>Copy Trading</td><td>❌</td><td>✅</td></tr>
 <tr><td>FDIC/FSCS Protection</td><td>✅ (Revolut Bank)</td><td>✅ (eToro EU)</td></tr>
 <tr><td>Weekend FX Surcharge</td><td>0.5–1% (plan-based)</td><td>None</td></tr>
+</tbody>
 </table>
 <h2>Verdict</h2>
-<p>For {sym}: {'Revolut is the better choice for existing users due to integrated banking.' if on_rev else 'Use eToro since ' + sym + ' is not on Revolut.'}</p>
-<p><a href="/guide/{sym}">← Revolut guide for {sym}</a> | <a href="/ticker/{sym}">Live data →</a></p>
+<p>For {sym}: {"Revolut is the better choice for existing users due to integrated banking." if on_rev else f"Use eToro since {sym} is not on Revolut."}</p>
+<p><a href="{SITE_URL}/guide/{sym}">← Revolut guide for {sym}</a> · <a href="{SITE_URL}/ticker/{sym}">Live data →</a></p>
 """
     return _seo_wrap(
         f"Revolut vs eToro for {sym} – Fees, Availability & Comparison {year}",
@@ -282,22 +307,22 @@ async def comparison_page(symbol: str):
         body,
     )
 
-
 @app.get("/sitemap.xml")
 async def sitemap():
     symbols = generate_all_symbols()
     today = datetime.now().strftime("%Y-%m-%d")
-    urls = (
-        f"<url><loc>{SITE_URL}/revolut-stocks</loc><lastmod>{today}</lastmod><changefreq>daily</changefreq></url>"
-        f"<url><loc>{SITE_URL}/revolut-crypto</loc><lastmod>{today}</lastmod><changefreq>daily</changefreq></url>"
-    )
+    urls = []
+    urls.append(f"  <url>\n    <loc>{SITE_URL}/revolut-stocks</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>0.9</priority>\n  </url>")
+    urls.append(f"  <url>\n    <loc>{SITE_URL}/revolut-crypto</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>0.9</priority>\n  </url>")
     for sym in symbols:
-        urls += f"<url><loc>{SITE_URL}/ticker/{sym}</loc><lastmod>{today}</lastmod><changefreq>hourly</changefreq></url>"
-        urls += f"<url><loc>{SITE_URL}/guide/{sym}</loc><lastmod>{today}</lastmod><changefreq>weekly</changefreq></url>"
-        urls += f"<url><loc>{SITE_URL}/revolut-vs-etoro/{sym}</loc><lastmod>{today}</lastmod><changefreq>weekly</changefreq></url>"
-    xml = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'
+        urls.append(f"  <url>\n    <loc>{SITE_URL}/ticker/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>hourly</changefreq>\n    <priority>0.8</priority>\n  </url>")
+        urls.append(f"  <url>\n    <loc>{SITE_URL}/guide/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>")
+        urls.append(f"  <url>\n    <loc>{SITE_URL}/revolut-vs-etoro/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>")
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{"\n".join(urls)}
+</urlset>"""
     return HTMLResponse(content=xml, media_type="application/xml")
-
 
 # ── MCP HTTP / JSON-RPC 2.0 ─────────────────────────────────────
 
@@ -312,7 +337,6 @@ async def mcp_sse(request: Request):
             await asyncio.sleep(30)
             yield ": heartbeat\n\n"
     return StreamingResponse(event_stream(), media_type="text/event-stream")
-
 
 @app.post("/mcp")
 async def mcp_jsonrpc(request: Request):
@@ -329,7 +353,7 @@ async def mcp_jsonrpc(request: Request):
             rpc["result"] = {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
-                "serverInfo": {"name": "real-time-stock-crypto-intelligence", "version": "5.2.1"},
+                "serverInfo": {"name": "real-time-stock-crypto-intelligence", "version": "5.2.2"},
             }
         elif method == "tools/list":
             rpc["result"] = {"tools": MCP_TOOLS_SCHEMA}
