@@ -1,11 +1,14 @@
 from domain.services import TradingDecisionEngine
 from infrastructure.providers.revolut import all_assets
 from datetime import datetime
+import os
 
 def generate_all_symbols() -> list:
     return [a["ticker"] for a in all_assets()]
 
-def render_page(symbol: str, ctx, site_url: str = "https://revolut-pulse.lovable.app") -> str:
+def render_page(symbol: str, ctx, site_url: str = None) -> str:
+    if site_url is None:
+        site_url = os.getenv("SITE_URL", "").rstrip("/")
     revolut_ok = TradingDecisionEngine.is_tradable_on(ctx, "revolut")
     best = TradingDecisionEngine.best_platform(ctx)
     price = f"${ctx.prices[0].value}" if ctx.prices else "N/A"
@@ -16,7 +19,7 @@ def render_page(symbol: str, ctx, site_url: str = "https://revolut-pulse.lovable
     <meta charset="UTF-8">
     <title>{symbol} on Revolut – Price, Fees & Availability</title>
     <meta name="description" content="Check if {symbol} is available on Revolut. Current price, insider trades, and step‑by‑step buying guide.">
-    <meta name="author" content="Revolut Pulse Financial Team">
+    <meta name="author" content="Real-Time Stock & Crypto Intelligence">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="{site_url}/ticker/{symbol}">
     <meta property="og:title" content="{symbol} on Revolut – Can You Trade It?">
@@ -37,3 +40,6 @@ def render_page(symbol: str, ctx, site_url: str = "https://revolut-pulse.lovable
     <p><a href="/sitemap.xml">Sitemap</a> | <a href="/revolut-stocks">All Stocks</a></p>
 </footer>
 </body></html>"""
+
+# Backward-compat alias — supports both old and new api.py imports
+render_ticker_page = render_page
