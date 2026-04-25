@@ -8,6 +8,7 @@ FIXES in v5.2.2:
 """
 import httpx
 import logging
+from typing import Optional
 from infrastructure.cache import cache_get, cache_set
 from domain.models import Price
 
