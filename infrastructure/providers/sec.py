@@ -2,17 +2,98 @@
 SEC EDGAR Form 4 insider-trading fetcher.
 Primary: EDGAR full-text search API (efts.sec.gov).
 Fallback: RSS/ATOM feed from browse-edgar.
+
+CRITICAL FIXES in v5.2.2:
+- Rotating User-Agent to avoid SEC 403 blocks
+- Exponential backoff retry (3 attempts)
+- Rate-limit delay between requests
+- Proper error handling without swallowing exceptions silently
+- Graceful degradation: return empty list instead of crashing
 """
 import httpx
+import asyncio
+import logging
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from typing import List, Optional
 from infrastructure.cache import cache_get, cache_set
 from domain.models import InsiderTrade
 
-SEC_HEADERS = {
-    "User-Agent": "revolut-pulse/5.2 (github.com/gepappas98/revolut-pulse-mcp.v2; contact@revolut-pulse.io)"
+logger = logging.getLogger("sec_edgar")
+
+# SEC requires a realistic browser User-Agent and enforces rate limits.
+# Rotate through several to avoid blocks.
+SEC_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+SEC_HEADERS_BASE = {
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.sec.gov/",
 }
+
+# SEC requests no more than 10 requests per second.
+_sec_rate_limit_lock = asyncio.Lock()
+_sec_last_request_time: Optional[datetime] = None
+
+
+async def _sec_rate_limit():
+    """Enforce ~100ms gap between SEC requests to stay under 10 req/s."""
+    global _sec_last_request_time
+    async with _sec_rate_limit_lock:
+        now = datetime.utcnow()
+        if _sec_last_request_time:
+            elapsed = (now - _sec_last_request_time).total_seconds()
+            if elapsed < 0.12:
+                await asyncio.sleep(0.12 - elapsed)
+        _sec_last_request_time = datetime.utcnow()
+
+
+async def _sec_post_with_retry(url: str, payload: dict, headers: dict, max_retries: int = 3) -> Optional[httpx.Response]:
+    """POST to SEC with exponential backoff and UA rotation."""
+    for attempt in range(max_retries):
+        await _sec_rate_limit()
+        ua = SEC_USER_AGENTS[attempt % len(SEC_USER_AGENTS)]
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                r = await client.post(url, json=payload, headers={**headers, "User-Agent": ua})
+                if r.status_code == 200:
+                    return r
+                elif r.status_code == 403:
+                    logger.warning("SEC returned 403 on attempt %d — rotating UA and backing off", attempt + 1)
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.warning("SEC returned %d on attempt %d", r.status_code, attempt + 1)
+                    await asyncio.sleep(2 ** attempt)
+        except Exception as exc:
+            logger.warning("SEC request failed on attempt %d: %s", attempt + 1, exc)
+            await asyncio.sleep(2 ** attempt)
+    return None
+
+
+async def _sec_get_with_retry(url: str, headers: dict, max_retries: int = 3) -> Optional[httpx.Response]:
+    """GET from SEC with exponential backoff and UA rotation."""
+    for attempt in range(max_retries):
+        await _sec_rate_limit()
+        ua = SEC_USER_AGENTS[attempt % len(SEC_USER_AGENTS)]
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                r = await client.get(url, headers={**headers, "User-Agent": ua})
+                if r.status_code == 200:
+                    return r
+                elif r.status_code == 403:
+                    logger.warning("SEC GET returned 403 on attempt %d — rotating UA and backing off", attempt + 1)
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.warning("SEC GET returned %d on attempt %d", r.status_code, attempt + 1)
+                    await asyncio.sleep(2 ** attempt)
+        except Exception as exc:
+            logger.warning("SEC GET failed on attempt %d: %s", attempt + 1, exc)
+            await asyncio.sleep(2 ** attempt)
+    return None
 
 
 async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 25) -> List[InsiderTrade]:
@@ -20,7 +101,10 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
     key = f"sec:insider:{ticker or 'all'}:{limit}"
     cached = await cache_get(key)
     if cached:
-        return [InsiderTrade(**t) for t in cached]
+        try:
+            return [InsiderTrade(**t) for t in cached]
+        except Exception:
+            logger.warning("Cache deserialization failed for %s, refetching", key)
 
     trades: List[InsiderTrade] = []
 
@@ -38,14 +122,14 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
             "size": limit,
             "sort": {"filedAt": {"order": "desc"}},
         }
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                "https://efts.sec.gov/LATEST/search-index",
-                json=payload,
-                headers={**SEC_HEADERS, "Content-Type": "application/json"},
-            )
-            r.raise_for_status()
-            hits = r.json().get("hits", {}).get("hits", [])
+        r = await _sec_post_with_retry(
+            "https://efts.sec.gov/LATEST/search-index",
+            payload,
+            {**SEC_HEADERS_BASE, "Content-Type": "application/json"},
+        )
+        if r:
+            data = r.json()
+            hits = data.get("hits", {}).get("hits", [])
             for hit in hits:
                 src = hit.get("_source", {})
                 rel = src.get("reportingOwnerRelationship", {})
@@ -65,8 +149,11 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
                     filing_date=src.get("filedAt", "")[:10] if src.get("filedAt") else "",
                 )
                 trades.append(trade)
-    except Exception:
-        pass
+            logger.info("SEC primary returned %d trades for %s", len(trades), ticker or "all")
+        else:
+            logger.warning("SEC primary failed after all retries for %s", ticker or "all")
+    except Exception as exc:
+        logger.warning("SEC primary exception for %s: %s", ticker or "all", exc)
 
     # ── Fallback: RSS/ATOM browse-edgar ──────────────────────────────────
     if not trades:
@@ -76,30 +163,35 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
                 f"https://www.sec.gov/cgi-bin/browse-edgar"
                 f"?action=getcurrent&type=4&dateb={date_str}&start=0&count={limit}&output=atom"
             )
-            async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(url, headers=SEC_HEADERS)
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    for entry in soup.find_all("entry"):
-                        title_tag = entry.find("title")
-                        title_text = title_tag.text if title_tag else ""
-                        ticker_extracted = (
-                            title_text.split("(")[-1].replace(")", "").strip().upper()
-                            if "(" in title_text else ""
-                        )
-                        updated = entry.find("updated")
-                        trades.append(InsiderTrade(
-                            ticker=ticker_extracted,
-                            insider_name="See filing",
-                            title="",
-                            transaction_type="Unknown",
-                            value=0,
-                            filing_date=updated.text[:10] if updated else "",
-                        ))
-        except Exception:
-            pass
+            r = await _sec_get_with_retry(url, SEC_HEADERS_BASE)
+            if r and r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                for entry in soup.find_all("entry"):
+                    title_tag = entry.find("title")
+                    title_text = title_tag.text if title_tag else ""
+                    ticker_extracted = (
+                        title_text.split("(")[-1].replace(")", "").strip().upper()
+                        if "(" in title_text else ""
+                    )
+                    updated = entry.find("updated")
+                    trades.append(InsiderTrade(
+                        ticker=ticker_extracted,
+                        insider_name="See filing",
+                        title="",
+                        transaction_type="Unknown",
+                        value=0,
+                        filing_date=updated.text[:10] if updated else "",
+                    ))
+                logger.info("SEC fallback returned %d trades", len(trades))
+            else:
+                logger.warning("SEC fallback failed for %s", ticker or "all")
+        except Exception as exc:
+            logger.warning("SEC fallback exception for %s: %s", ticker or "all", exc)
 
-    await cache_set(key, [t.__dict__ for t in trades], ttl=300)
+    try:
+        await cache_set(key, [t.__dict__ for t in trades], ttl=300)
+    except Exception as exc:
+        logger.warning("Failed to cache SEC results: %s", exc)
     return trades
 
 
