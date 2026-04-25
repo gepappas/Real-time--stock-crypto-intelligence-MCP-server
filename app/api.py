@@ -318,9 +318,10 @@ async def sitemap():
         urls.append(f"  <url>\n    <loc>{SITE_URL}/ticker/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>hourly</changefreq>\n    <priority>0.8</priority>\n  </url>")
         urls.append(f"  <url>\n    <loc>{SITE_URL}/guide/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>")
         urls.append(f"  <url>\n    <loc>{SITE_URL}/revolut-vs-etoro/{sym}</loc>\n    <lastmod>{today}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>")
+    urls_joined = "\n".join(urls)
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-{"\n".join(urls)}
+{urls_joined}
 </urlset>"""
     return HTMLResponse(content=xml, media_type="application/xml")
 
@@ -330,7 +331,8 @@ async def sitemap():
 async def mcp_sse(request: Request):
     """SSE endpoint for MCP probe/heartbeat."""
     async def event_stream():
-        yield f"event: endpoint\ndata: {json.dumps({'endpoint': '/mcp'})}\n\n"
+        endpoint_data = json.dumps({'endpoint': '/mcp'})
+        yield f"event: endpoint\ndata: {endpoint_data}\n\n"
         while True:
             if await request.is_disconnected():
                 break
