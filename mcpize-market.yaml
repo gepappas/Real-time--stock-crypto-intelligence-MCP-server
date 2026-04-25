@@ -1,0 +1,40 @@
+version: 1
+name: market-data-intelligence
+description: >
+  Real-time stock & crypto market intelligence — 19 tools, 13 prompts, 4 resources.
+  Live prices from Yahoo Finance & Binance. SEC EDGAR insider filing detection.
+  CEO/CFO cluster alerts. FX rates from ECB. No API keys required.
+runtime: python
+entry: main.py
+
+build:
+  install: pip install -r requirements.txt
+
+startCommand:
+  type: http
+  command: python main.py
+
+secrets:
+  - name: TOOLS_MODE
+    required: true
+    description: "Must be set to: market"
+
+  - name: MCP_TRANSPORT
+    required: true
+    description: "Must be set to: http"
+
+  - name: SITE_URL
+    required: true
+    description: "Public Cloud Run URL of this deployment — used for canonical tags and sitemap"
+
+  - name: PORT
+    required: false
+    description: "Server port (default: 8080)"
+
+  - name: REDIS_URL
+    required: false
+    description: "Redis connection URL for caching (optional — in-memory fallback used if absent)"
+
+  - name: MCPRICE_ALERT_WEBHOOK
+    required: false
+    description: "Webhook URL to receive price & insider trade alerts"
