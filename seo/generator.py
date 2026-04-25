@@ -161,7 +161,7 @@ def _build_json_ld(
                         "name": f"Can I buy {symbol} on Revolut?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": f"{"Yes, " + symbol + " is available for trading on Revolut with real-time market data and competitive fees." if revolut_ok else "No, " + symbol + " is not currently available on Revolut. The best alternative platform is " + best_platform + "."}",
+                            "text": f'{"Yes, " + symbol + " is available for trading on Revolut with real-time market data and competitive fees." if revolut_ok else "No, " + symbol + " is not currently available on Revolut. The best alternative platform is " + best_platform + "."}',
                         },
                     },
                     {
@@ -169,7 +169,7 @@ def _build_json_ld(
                         "name": f"What is the current price of {symbol}?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": f"The current price of {symbol} is {price_display}. Prices are updated in real-time during market hours.",
+                            "text": f'The current price of {symbol} is {price_display}. Prices are updated in real-time during market hours.',
                         },
                     },
                     {
@@ -177,7 +177,7 @@ def _build_json_ld(
                         "name": f"Has there been recent insider trading activity for {symbol}?",
                         "acceptedAnswer": {
                             "@type": "Answer",
-                            "text": f"{"Yes, there have been recent insider transactions reported to the SEC for " + symbol + ". Review the latest filings before making investment decisions." if has_insider else "No recent insider trading activity has been reported for " + symbol + " in the latest SEC filings."}",
+                            "text": f'{"Yes, there have been recent insider transactions reported to the SEC for " + symbol + ". Review the latest filings before making investment decisions." if has_insider else "No recent insider trading activity has been reported for " + symbol + " in the latest SEC filings."}',
                         },
                     },
                 ],
