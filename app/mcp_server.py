@@ -1,7 +1,14 @@
 """
 revolut-pulse-mcp — MCP Server
-All 38 tools · 17 prompts · 5 resources
-FastMCP for stdio transport; TOOL_HANDLERS dict for HTTP/JSON-RPC.
+Split-tool architecture: 38 tools · 17 prompts · 5 resources
+
+  TOOLS_MODE=market   → 19 market-data + insider tools  (no Revolut creds needed)
+  TOOLS_MODE=revolut  → 19 banking/trading tools         (per-user Revolut creds)
+  TOOLS_MODE=all      → all 38 tools  (local dev / legacy)
+
+FastMCP for stdio transport; TOOL_HANDLERS + MCP_TOOLS_SCHEMA for HTTP/JSON-RPC.
+Both transports now respect TOOLS_MODE so mcpize-market.yaml and
+mcpize-revolut.yaml produce correctly scoped deployments.
 """
 import json
 import os
@@ -14,7 +21,37 @@ from usecases.insider import enrich_insider_context, get_cluster_context, get_we
 from domain.services import TradingDecisionEngine
 from infrastructure.providers import binance, yahoo, revolut, sec, frankfurter
 
-mcp = FastMCP("revolut-pulse-mcp")
+# ── Tool-split mode ────────────────────────────────────────────────────────
+# Set by mcpize-market.yaml / mcpize-revolut.yaml via the TOOLS_MODE secret.
+TOOLS_MODE = os.getenv("TOOLS_MODE", "all").lower()
+
+MARKET_TOOL_NAMES = {
+    "get_price", "get_prices_bulk", "get_crypto_price", "price_snapshot",
+    "revolut_price_check", "crypto_top_movers",
+    "get_insider_filings", "get_insider_clusters", "get_insider_weekly_summary",
+    "search_revolut_tradable", "cross_reference_insider_revolut",
+    "get_revolut_tradable_list",
+    "get_exchange_rate", "convert_currency", "get_revolut_fx_fees",
+    "create_alert", "list_alerts", "delete_alert", "register_webhook",
+}
+
+REVOLUT_TOOL_NAMES = {
+    "get_accounts", "get_account_balance",
+    "get_pockets", "get_pocket_detail",
+    "get_transactions", "get_transaction_detail", "get_spending_by_category",
+    "send_domestic_payment", "send_international_payment", "create_standing_order",
+    "get_payment_status", "get_scheduled_payments", "get_account_statement",
+    "get_multi_currency_balances",
+    "get_crypto_tickers", "get_crypto_orders", "place_crypto_order",
+    "get_crypto_trades", "get_crypto_ohlc",
+}
+
+_server_name = {
+    "market": "market-data-intelligence",
+    "revolut": "revolut-banking",
+}.get(TOOLS_MODE, "real-time-stock-crypto-intelligence")
+
+mcp = FastMCP(_server_name)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -533,7 +570,18 @@ MCP_TOOLS_SCHEMA = [
     {"name": "register_webhook", "description": "Register a webhook URL for event notifications", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "events": {"type": "array", "items": {"type": "string"}}}, "required": ["url"]}},
 ]
 
-# Register all tools with FastMCP for stdio transport
+# ── Apply TOOLS_MODE filter ────────────────────────────────────────────────
+# Filter both dicts/lists so that HTTP (FastAPI) and stdio (FastMCP) transports
+# expose only the tools appropriate for this deployment.
+if TOOLS_MODE == "market":
+    TOOL_HANDLERS = {k: v for k, v in TOOL_HANDLERS.items() if k in MARKET_TOOL_NAMES}
+    MCP_TOOLS_SCHEMA = [t for t in MCP_TOOLS_SCHEMA if t["name"] in MARKET_TOOL_NAMES]
+elif TOOLS_MODE == "revolut":
+    TOOL_HANDLERS = {k: v for k, v in TOOL_HANDLERS.items() if k in REVOLUT_TOOL_NAMES}
+    MCP_TOOLS_SCHEMA = [t for t in MCP_TOOLS_SCHEMA if t["name"] in REVOLUT_TOOL_NAMES]
+# TOOLS_MODE=all (default): no filtering, all 38 tools exposed
+
+# Register filtered tools with FastMCP for stdio transport
 for _name, _func in TOOL_HANDLERS.items():
     mcp.tool()(_func)
 

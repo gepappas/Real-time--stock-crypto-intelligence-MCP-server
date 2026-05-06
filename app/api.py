@@ -329,9 +329,29 @@ async def sitemap():
 
 @app.get("/mcp/sse")
 async def mcp_sse(request: Request):
-    """SSE endpoint for MCP probe/heartbeat."""
+    """SSE endpoint for MCP probe/heartbeat.
+
+    The 'endpoint' event MUST carry an absolute URL so MCP HTTP bridge clients
+    (MCPize, Claude Desktop) know where to POST JSON-RPC messages.  A relative
+    path resolves against the proxy's own origin and the POST never reaches this
+    server — the proxy returns 403/404 on itself, which is the root cause of the
+    'init handshake failing' error.
+
+    Resolution order:
+      1. SITE_URL env var (recommended — set this in every deployment)
+      2. X-Forwarded-Proto + Host headers (Railway / Fly.io proxy)
+      3. Scheme + host from the incoming request
+    """
+    # Determine the public base URL at request time so it works even when
+    # SITE_URL is not set (e.g. local dev behind a tunnel).
+    base = SITE_URL
+    if not base:
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+        base = f"{scheme}://{host}"
+
     async def event_stream():
-        endpoint_data = json.dumps({'endpoint': '/mcp'})
+        endpoint_data = json.dumps({"endpoint": f"{base}/mcp"})
         yield f"event: endpoint\ndata: {endpoint_data}\n\n"
         while True:
             if await request.is_disconnected():
@@ -340,14 +360,45 @@ async def mcp_sse(request: Request):
             yield ": heartbeat\n\n"
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+# Optional server-level auth: set MCPRICE_API_KEYS=key1,key2 to restrict access.
+# Leave unset (or empty) to allow unauthenticated requests (free-tier / local dev).
+_RAW_API_KEYS = os.getenv("MCPRICE_API_KEYS", "")
+_ALLOWED_API_KEYS: set[str] = {k.strip() for k in _RAW_API_KEYS.split(",") if k.strip()}
+
+
 @app.post("/mcp")
 async def mcp_jsonrpc(request: Request):
-    """MCP JSON-RPC 2.0 endpoint."""
+    """MCP JSON-RPC 2.0 endpoint.
+
+    Auth: if MCPRICE_API_KEYS is set, the caller must supply a matching key in
+    the X-API-Key header.  When the env var is absent (free tier / local dev)
+    the endpoint is open.
+
+    Notifications: JSON-RPC 2.0 requests without an 'id' field are
+    notifications; the server MUST NOT send a response.  Returning an error for
+    notifications/initialized breaks the MCP init handshake.
+    """
+    # ── Optional API-key gate ────────────────────────────────────────────────
+    if _ALLOWED_API_KEYS:
+        caller_key = request.headers.get("x-api-key", "")
+        if caller_key not in _ALLOWED_API_KEYS:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Forbidden — valid X-API-Key required"},
+            )
+
     from app.mcp_server import TOOL_HANDLERS, MCP_TOOLS_SCHEMA
 
     body = await request.json()
     method = body.get("method", "")
-    req_id = body.get("id")
+    req_id = body.get("id")  # None means it's a JSON-RPC notification
+
+    # ── Notifications: fire-and-forget, no response allowed ─────────────────
+    # MCP uses notifications/initialized, notifications/cancelled, etc.
+    # Returning any JSON-RPC response (including errors) breaks the handshake.
+    if req_id is None and method.startswith("notifications/"):
+        return JSONResponse(content={}, status_code=200)
+
     rpc: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
 
     try:

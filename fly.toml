@@ -13,12 +13,21 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
-  min_machines_running = 0
+  # Keep at least one machine running so the MCP init probe never hits a cold
+  # start.  Cold starts (5–30 s) exceed MCPize's handshake timeout → F grade.
+  min_machines_running = 1
 
   [http_service.concurrency]
     type = "connections"
     hard_limit = 25
     soft_limit = 20
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/ping"
+    timeout = "5s"
 
 [[vm]]
   cpu_kind = "shared"
