@@ -1,10 +1,14 @@
 """
-real-time-stock-crypto-intelligence — MCP Server
-Split architecture: 38 tools · 17 prompts · 5 resources
-  TOOLS_MODE=market   → 19 market-data tools  (free tier)
-  TOOLS_MODE=revolut  → 19 banking/trading tools (per-user keys)
-  TOOLS_MODE=all      → all 38 tools (local dev / legacy)
-FastMCP for stdio transport; TOOL_HANDLERS dict for HTTP/JSON-RPC.
+revolut-pulse-mcp — MCP Server
+Split-tool architecture: 38 tools · 17 prompts · 5 resources
+
+  TOOLS_MODE=market   → 19 market-data + insider tools  (no Revolut creds needed)
+  TOOLS_MODE=revolut  → 19 banking/trading tools         (per-user Revolut creds)
+  TOOLS_MODE=all      → all 38 tools  (local dev / legacy)
+
+FastMCP for stdio transport; TOOL_HANDLERS + MCP_TOOLS_SCHEMA for HTTP/JSON-RPC.
+Both transports now respect TOOLS_MODE so mcpize-market.yaml and
+mcpize-revolut.yaml produce correctly scoped deployments.
 """
 import json
 import os
@@ -18,9 +22,7 @@ from domain.services import TradingDecisionEngine
 from infrastructure.providers import binance, yahoo, revolut, sec, frankfurter
 
 # ── Tool-split mode ────────────────────────────────────────────────────────
-# "all"     → all 38 tools (legacy / local dev)
-# "market"  → 19 market-intelligence tools only (free tier MCPize deployment)
-# "revolut" → 19 Revolut banking/trading tools only (paid tier MCPize deployment)
+# Set by mcpize-market.yaml / mcpize-revolut.yaml via the TOOLS_MODE secret.
 TOOLS_MODE = os.getenv("TOOLS_MODE", "all").lower()
 
 MARKET_TOOL_NAMES = {
@@ -479,7 +481,7 @@ async def register_webhook(url: str, events: Optional[List[str]] = None) -> dict
 #  TOOL REGISTRY  (38 tools)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ALL_TOOL_HANDLERS = {
+TOOL_HANDLERS = {
     # Price
     "get_price": get_price,
     "get_prices_bulk": get_prices_bulk,
@@ -527,63 +529,603 @@ _ALL_TOOL_HANDLERS = {
     "register_webhook": register_webhook,
 }
 
-def _filter_tools(handlers: dict) -> dict:
-    if TOOLS_MODE == "market":
-        return {k: v for k, v in handlers.items() if k in MARKET_TOOL_NAMES}
-    if TOOLS_MODE == "revolut":
-        return {k: v for k, v in handlers.items() if k in REVOLUT_TOOL_NAMES}
-    return handlers  # "all" — keep everything
-
-TOOL_HANDLERS = _filter_tools(_ALL_TOOL_HANDLERS)
-
-_ALL_MCP_TOOLS_SCHEMA = [
-    {"name": "get_price", "description": "Current stock/ETF price with Revolut availability", "inputSchema": {"type": "object", "properties": {"ticker": {"type": "string", "description": "e.g. AAPL, NVDA, SPY"}}, "required": ["ticker"]}},
-    {"name": "get_prices_bulk", "description": "Prices for up to 20 tickers at once with gainer/loser summary", "inputSchema": {"type": "object", "properties": {"tickers": {"type": "array", "items": {"type": "string"}, "description": "List of tickers"}}, "required": ["tickers"]}},
-    {"name": "get_crypto_price", "description": "Real-time crypto price from Binance 24hr ticker", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string", "description": "e.g. BTC, ETH, SOL"}}, "required": ["symbol"]}},
-    {"name": "price_snapshot", "description": "Rich market snapshot for default or custom watchlist", "inputSchema": {"type": "object", "properties": {"tickers": {"type": "array", "items": {"type": "string"}, "description": "Optional custom list"}}}},
-    {"name": "revolut_price_check", "description": "Price + Revolut availability + quick verdict", "inputSchema": {"type": "object", "properties": {"ticker": {"type": "string"}}, "required": ["ticker"]}},
-    {"name": "crypto_top_movers", "description": "Top crypto gainers & losers from Binance by 24h volume", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 10}, "min_volume_usd": {"type": "number", "default": 10000000}}}},
-    {"name": "get_insider_filings", "description": "Form 4 insider filings from SEC EDGAR", "inputSchema": {"type": "object", "properties": {"ticker": {"type": "string", "description": "Optional ticker filter"}, "limit": {"type": "integer", "default": 25}}}},
-    {"name": "get_insider_clusters", "description": "Multiple insiders trading same ticker same day", "inputSchema": {"type": "object", "properties": {"days": {"type": "integer", "default": 7}}}},
-    {"name": "get_insider_weekly_summary", "description": "Structured weekly insider summary with CEO count", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "search_revolut_tradable", "description": "Search Revolut assets by ticker or name substring", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
-    {"name": "cross_reference_insider_revolut", "description": "Insider filings cross-referenced with Revolut tradable list", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 25}}}},
-    {"name": "get_revolut_tradable_list", "description": "Full Revolut asset list: stocks, crypto, or all", "inputSchema": {"type": "object", "properties": {"category": {"type": "string", "enum": ["all", "stocks", "crypto"], "default": "all"}}}},
-    {"name": "get_accounts", "description": "Revolut Open Banking accounts (requires setup)", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "get_account_balance", "description": "Account balance by ID", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}}, "required": ["account_id"]}},
-    {"name": "get_pockets", "description": "Revolut vaults/pockets (requires personal API setup)", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "get_pocket_detail", "description": "Pocket detail by ID", "inputSchema": {"type": "object", "properties": {"pocket_id": {"type": "string"}}, "required": ["pocket_id"]}},
-    {"name": "get_transactions", "description": "Transaction list for an account", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}, "from_date": {"type": "string"}, "to_date": {"type": "string"}, "limit": {"type": "integer", "default": 50}}, "required": ["account_id"]}},
-    {"name": "get_transaction_detail", "description": "Single transaction detail", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}, "transaction_id": {"type": "string"}}, "required": ["account_id", "transaction_id"]}},
-    {"name": "get_spending_by_category", "description": "Spending breakdown by merchant category", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}, "month": {"type": "string"}}, "required": ["account_id"]}},
-    {"name": "send_domestic_payment", "description": "Send domestic bank transfer (requires PIS consent)", "inputSchema": {"type": "object", "properties": {"amount": {"type": "number"}, "currency": {"type": "string"}, "creditor_name": {"type": "string"}, "creditor_account": {"type": "string"}, "reference": {"type": "string"}}, "required": ["amount", "currency", "creditor_name", "creditor_account"]}},
-    {"name": "send_international_payment", "description": "Send international SWIFT/SEPA payment", "inputSchema": {"type": "object", "properties": {"amount": {"type": "number"}, "currency": {"type": "string"}, "creditor_name": {"type": "string"}, "creditor_account": {"type": "string"}, "creditor_bic": {"type": "string"}}, "required": ["amount", "currency", "creditor_name", "creditor_account", "creditor_bic"]}},
-    {"name": "create_standing_order", "description": "Create a recurring standing order", "inputSchema": {"type": "object", "properties": {"amount": {"type": "number"}, "currency": {"type": "string"}, "frequency": {"type": "string"}, "creditor_name": {"type": "string"}, "creditor_account": {"type": "string"}}, "required": ["amount", "currency", "frequency", "creditor_name", "creditor_account"]}},
-    {"name": "get_payment_status", "description": "Check status of a payment", "inputSchema": {"type": "object", "properties": {"payment_id": {"type": "string"}, "payment_type": {"type": "string", "default": "domestic"}}, "required": ["payment_id"]}},
-    {"name": "get_scheduled_payments", "description": "List all scheduled/standing orders", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}}, "required": ["account_id"]}},
-    {"name": "get_account_statement", "description": "Download account statement for a date range", "inputSchema": {"type": "object", "properties": {"account_id": {"type": "string"}, "from_date": {"type": "string"}, "to_date": {"type": "string"}}, "required": ["account_id"]}},
-    {"name": "get_multi_currency_balances", "description": "All multi-currency wallet balances", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "get_exchange_rate", "description": "FX rates from ECB via Frankfurter", "inputSchema": {"type": "object", "properties": {"base": {"type": "string", "default": "GBP"}, "targets": {"type": "string", "default": "EUR,USD"}, "date": {"type": "string"}}}},
-    {"name": "convert_currency", "description": "Convert amount between currencies (ECB rates)", "inputSchema": {"type": "object", "properties": {"amount": {"type": "number"}, "from_currency": {"type": "string"}, "to_currency": {"type": "string"}}, "required": ["amount", "from_currency", "to_currency"]}},
-    {"name": "get_revolut_fx_fees", "description": "Estimate Revolut FX fees by plan and amount", "inputSchema": {"type": "object", "properties": {"plan": {"type": "string", "enum": ["standard", "premium", "metal"], "default": "standard"}, "amount": {"type": "number", "default": 1000}, "from_currency": {"type": "string", "default": "GBP"}, "to_currency": {"type": "string", "default": "EUR"}}}},
-    {"name": "get_crypto_tickers", "description": "Revolut X exchange tickers (requires API key)", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "get_crypto_orders", "description": "Active orders on Revolut X", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "place_crypto_order", "description": "Place market or limit order on Revolut X", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}, "side": {"type": "string", "enum": ["buy", "sell"]}, "order_type": {"type": "string", "enum": ["market", "limit"]}, "quantity": {"type": "number"}, "price": {"type": "number"}}, "required": ["symbol", "side", "order_type", "quantity"]}},
-    {"name": "get_crypto_trades", "description": "Crypto trade history on Revolut X", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}, "limit": {"type": "integer", "default": 50}}}},
-    {"name": "get_crypto_ohlc", "description": "OHLCV candle data from Revolut X", "inputSchema": {"type": "object", "properties": {"symbol": {"type": "string"}, "interval": {"type": "string", "default": "1h"}, "limit": {"type": "integer", "default": 100}}, "required": ["symbol"]}},
-    {"name": "create_alert", "description": "Create a price alert (above/below target)", "inputSchema": {"type": "object", "properties": {"alert_type": {"type": "string"}, "target": {"type": "number"}, "direction": {"type": "string", "enum": ["above", "below"], "default": "above"}, "ticker": {"type": "string"}, "user_id": {"type": "string", "default": "default"}}, "required": ["alert_type", "target"]}},
-    {"name": "list_alerts", "description": "List all active alerts for a user", "inputSchema": {"type": "object", "properties": {"user_id": {"type": "string", "default": "default"}}}},
-    {"name": "delete_alert", "description": "Delete an alert by ID", "inputSchema": {"type": "object", "properties": {"alert_id": {"type": "string"}}, "required": ["alert_id"]}},
-    {"name": "register_webhook", "description": "Register a webhook URL for event notifications", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "events": {"type": "array", "items": {"type": "string"}}}, "required": ["url"]}},
-]
-
-# Filter schema to match active TOOLS_MODE
 MCP_TOOLS_SCHEMA = [
-    t for t in _ALL_MCP_TOOLS_SCHEMA
-    if TOOLS_MODE == "all"
-    or (TOOLS_MODE == "market" and t["name"] in MARKET_TOOL_NAMES)
-    or (TOOLS_MODE == "revolut" and t["name"] in REVOLUT_TOOL_NAMES)
+    # ── Price tools ──────────────────────────────────────────────────────────
+    {
+        "name": "get_price",
+        "description": "Current stock/ETF price with Revolut availability",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock or ETF ticker symbol"},
+            },
+            "required": ["ticker"],
+            "examples": [
+                {"ticker": "NVDA"},
+                {"ticker": "AAPL"},
+                {"ticker": "SPY"},
+            ],
+        },
+    },
+    {
+        "name": "get_prices_bulk",
+        "description": "Prices for up to 20 tickers at once with gainer/loser summary",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tickers": {"type": "array", "items": {"type": "string"}, "description": "List of stock/ETF tickers (max 20)"},
+            },
+            "required": ["tickers"],
+            "examples": [
+                {"tickers": ["AAPL", "MSFT", "NVDA", "TSLA", "META"]},
+                {"tickers": ["SPY", "QQQ", "GLD", "LMT", "RTX"]},
+            ],
+        },
+    },
+    {
+        "name": "get_crypto_price",
+        "description": "Real-time crypto price from Binance 24hr ticker",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Crypto symbol without USDT suffix"},
+            },
+            "required": ["symbol"],
+            "examples": [
+                {"symbol": "BTC"},
+                {"symbol": "ETH"},
+                {"symbol": "SOL"},
+            ],
+        },
+    },
+    {
+        "name": "price_snapshot",
+        "description": "Rich market snapshot for default or custom watchlist",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tickers": {"type": "array", "items": {"type": "string"}, "description": "Optional custom list; omit for default (NVDA, AAPL, MSFT, TSLA, BTC, ETH, SOL)"},
+            },
+            "examples": [
+                {},
+                {"tickers": ["NVDA", "AAPL", "BTC", "ETH", "SOL"]},
+                {"tickers": ["LMT", "RTX", "BA", "GLD", "SPY"]},
+            ],
+        },
+    },
+    {
+        "name": "revolut_price_check",
+        "description": "Price + Revolut availability + quick buy/skip verdict",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Stock, ETF, or crypto symbol"},
+            },
+            "required": ["ticker"],
+            "examples": [
+                {"ticker": "TSLA"},
+                {"ticker": "AMZN"},
+                {"ticker": "BTC"},
+            ],
+        },
+    },
+    {
+        "name": "crypto_top_movers",
+        "description": "Top crypto gainers & losers from Binance by 24h volume",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 10, "description": "Number of results per side (gainers / losers)"},
+                "min_volume_usd": {"type": "number", "default": 10000000, "description": "Minimum 24h USD volume filter"},
+            },
+            "examples": [
+                {},
+                {"limit": 5, "min_volume_usd": 50000000},
+                {"limit": 20, "min_volume_usd": 1000000},
+            ],
+        },
+    },
+    # ── Insider tools ────────────────────────────────────────────────────────
+    {
+        "name": "get_insider_filings",
+        "description": "Form 4 insider filings from SEC EDGAR — CEO/CFO buy & sell transactions",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Filter to a specific company (omit for all recent filings)"},
+                "limit": {"type": "integer", "default": 25, "description": "Max filings to return"},
+            },
+            "examples": [
+                {"ticker": "NVDA", "limit": 10},
+                {"ticker": "AAPL"},
+                {"limit": 50},
+            ],
+        },
+    },
+    {
+        "name": "get_insider_clusters",
+        "description": "Detect tickers where multiple insiders traded on the same day — strong conviction signal",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "default": 7, "description": "Look-back window in days"},
+            },
+            "examples": [
+                {},
+                {"days": 3},
+                {"days": 30},
+            ],
+        },
+    },
+    {
+        "name": "get_insider_weekly_summary",
+        "description": "Structured weekly insider summary: top buys, CEO/CFO count, largest trades",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    {
+        "name": "search_revolut_tradable",
+        "description": "Search Revolut assets by ticker or company name substring",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Ticker or partial company name"},
+            },
+            "required": ["query"],
+            "examples": [
+                {"query": "apple"},
+                {"query": "NVDA"},
+                {"query": "semiconductor"},
+            ],
+        },
+    },
+    {
+        "name": "cross_reference_insider_revolut",
+        "description": "Insider filings filtered to only tickers tradable on Revolut — actionable signal list",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 25, "description": "Max filings to cross-reference"},
+            },
+            "examples": [
+                {},
+                {"limit": 10},
+                {"limit": 50},
+            ],
+        },
+    },
+    {
+        "name": "get_revolut_tradable_list",
+        "description": "Full Revolut asset catalogue: stocks, crypto, or both",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": ["all", "stocks", "crypto"], "default": "all"},
+            },
+            "examples": [
+                {},
+                {"category": "stocks"},
+                {"category": "crypto"},
+            ],
+        },
+    },
+    # ── Banking tools ────────────────────────────────────────────────────────
+    {
+        "name": "get_accounts",
+        "description": "List all Revolut Open Banking accounts (requires REVOLUT_CLIENT_ID setup)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    {
+        "name": "get_account_balance",
+        "description": "Current balance for a specific Revolut account",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Account ID from get_accounts"},
+            },
+            "required": ["account_id"],
+            "examples": [
+                {"account_id": "acc_123abc"},
+            ],
+        },
+    },
+    {
+        "name": "get_pockets",
+        "description": "List all Revolut vaults/pockets (requires REVOLUT_DEVICE_ID + REVOLUT_PHONE_TOKEN)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    {
+        "name": "get_pocket_detail",
+        "description": "Detail for a single Revolut vault or savings pocket",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Pocket ID from get_pockets"},
+            },
+            "required": ["pocket_id"],
+            "examples": [
+                {"pocket_id": "pkt_456def"},
+            ],
+        },
+    },
+    {
+        "name": "get_transactions",
+        "description": "Paginated transaction list for a Revolut account with optional date range",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Account ID from get_accounts"},
+                "from_date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+                "to_date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["account_id"],
+            "examples": [
+                {"account_id": "acc_123abc", "from_date": "2024-01-01", "to_date": "2024-01-31"},
+                {"account_id": "acc_123abc", "limit": 10},
+                {"account_id": "acc_123abc"},
+            ],
+        },
+    },
+    {
+        "name": "get_transaction_detail",
+        "description": "Full detail for a single Revolut transaction including merchant and category",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Account ID from get_accounts"},
+                "transaction_id": {"type": "string", "description": "Transaction ID from get_transactions"},
+            },
+            "required": ["account_id", "transaction_id"],
+            "examples": [
+                {"account_id": "acc_123abc", "transaction_id": "txn_789ghi"},
+            ],
+        },
+    },
+    {
+        "name": "get_spending_by_category",
+        "description": "Monthly spending breakdown grouped by merchant category",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "Account ID from get_accounts"},
+                "month": {"type": "string", "description": "YYYY-MM format; omit for current month"},
+            },
+            "required": ["account_id"],
+            "examples": [
+                {"account_id": "acc_123abc", "month": "2024-01"},
+                {"account_id": "acc_123abc"},
+            ],
+        },
+    },
+    {
+        "name": "send_domestic_payment",
+        "description": "Send a domestic bank transfer from Revolut (requires PIS consent)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number", "description": "Payment amount"},
+                "currency": {"type": "string", "description": "ISO 4217 currency code"},
+                "creditor_name": {"type": "string"},
+                "creditor_account": {"type": "string", "description": "IBAN or domestic account number"},
+                "reference": {"type": "string", "description": "Payment reference shown on recipient statement"},
+            },
+            "required": ["amount", "currency", "creditor_name", "creditor_account"],
+            "examples": [
+                {"amount": 250.00, "currency": "GBP", "creditor_name": "Jane Smith", "creditor_account": "GB29NWBK60161331926819", "reference": "Rent March"},
+                {"amount": 50.00, "currency": "EUR", "creditor_name": "John Doe", "creditor_account": "DE89370400440532013000", "reference": "Dinner split"},
+            ],
+        },
+    },
+    {
+        "name": "send_international_payment",
+        "description": "Send an international SWIFT or SEPA payment from Revolut",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "currency": {"type": "string", "description": "ISO 4217 currency code"},
+                "creditor_name": {"type": "string"},
+                "creditor_account": {"type": "string", "description": "IBAN"},
+                "creditor_bic": {"type": "string", "description": "BIC/SWIFT code of the recipient bank"},
+            },
+            "required": ["amount", "currency", "creditor_name", "creditor_account", "creditor_bic"],
+            "examples": [
+                {"amount": 1000.00, "currency": "EUR", "creditor_name": "Acme GmbH", "creditor_account": "DE89370400440532013000", "creditor_bic": "COBADEFFXXX"},
+                {"amount": 500.00, "currency": "USD", "creditor_name": "Supplier Inc", "creditor_account": "US12345678901234567890", "creditor_bic": "CHASUS33"},
+            ],
+        },
+    },
+    {
+        "name": "create_standing_order",
+        "description": "Create a recurring standing order on Revolut",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "currency": {"type": "string"},
+                "frequency": {"type": "string", "description": "weekly | monthly | quarterly"},
+                "creditor_name": {"type": "string"},
+                "creditor_account": {"type": "string", "description": "IBAN or domestic account number"},
+            },
+            "required": ["amount", "currency", "frequency", "creditor_name", "creditor_account"],
+            "examples": [
+                {"amount": 800.00, "currency": "GBP", "frequency": "monthly", "creditor_name": "Landlord Ltd", "creditor_account": "GB29NWBK60161331926819"},
+                {"amount": 200.00, "currency": "EUR", "frequency": "weekly", "creditor_name": "Savings Account", "creditor_account": "DE89370400440532013000"},
+            ],
+        },
+    },
+    {
+        "name": "get_payment_status",
+        "description": "Check the current status of a submitted payment",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "payment_id": {"type": "string", "description": "Payment ID returned by send_domestic_payment or send_international_payment"},
+                "payment_type": {"type": "string", "default": "domestic", "description": "domestic | international"},
+            },
+            "required": ["payment_id"],
+            "examples": [
+                {"payment_id": "pay_abc123", "payment_type": "domestic"},
+                {"payment_id": "pay_xyz789", "payment_type": "international"},
+            ],
+        },
+    },
+    {
+        "name": "get_scheduled_payments",
+        "description": "List all active scheduled payments and standing orders for an account",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string"},
+            },
+            "required": ["account_id"],
+            "examples": [
+                {"account_id": "acc_123abc"},
+            ],
+        },
+    },
+    {
+        "name": "get_account_statement",
+        "description": "Download a Revolut account statement for a given date range",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string"},
+                "from_date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+                "to_date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+            },
+            "required": ["account_id"],
+            "examples": [
+                {"account_id": "acc_123abc", "from_date": "2024-01-01", "to_date": "2024-03-31"},
+                {"account_id": "acc_123abc", "from_date": "2024-12-01", "to_date": "2024-12-31"},
+            ],
+        },
+    },
+    {
+        "name": "get_multi_currency_balances",
+        "description": "All Revolut multi-currency wallet balances in a single call",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    # ── FX tools ─────────────────────────────────────────────────────────────
+    {
+        "name": "get_exchange_rate",
+        "description": "FX rates from ECB via Frankfurter — spot or historical",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "base": {"type": "string", "default": "GBP", "description": "ISO 4217 base currency"},
+                "targets": {"type": "string", "default": "EUR,USD", "description": "Comma-separated target currencies"},
+                "date": {"type": "string", "description": "ISO date for historical rate; omit for latest"},
+            },
+            "examples": [
+                {"base": "GBP", "targets": "EUR,USD,JPY"},
+                {"base": "USD", "targets": "EUR,GBP,CHF", "date": "2024-01-15"},
+                {"base": "EUR", "targets": "USD"},
+            ],
+        },
+    },
+    {
+        "name": "convert_currency",
+        "description": "Convert an amount between any two currencies using ECB rates",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "from_currency": {"type": "string", "description": "ISO 4217 source currency"},
+                "to_currency": {"type": "string", "description": "ISO 4217 target currency"},
+            },
+            "required": ["amount", "from_currency", "to_currency"],
+            "examples": [
+                {"amount": 1000, "from_currency": "GBP", "to_currency": "EUR"},
+                {"amount": 500, "from_currency": "USD", "to_currency": "JPY"},
+                {"amount": 250, "from_currency": "EUR", "to_currency": "CHF"},
+            ],
+        },
+    },
+    {
+        "name": "get_revolut_fx_fees",
+        "description": "Estimate Revolut FX conversion fees and weekend surcharge by plan",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plan": {"type": "string", "enum": ["standard", "premium", "metal"], "default": "standard"},
+                "amount": {"type": "number", "default": 1000},
+                "from_currency": {"type": "string", "default": "GBP"},
+                "to_currency": {"type": "string", "default": "EUR"},
+            },
+            "examples": [
+                {"plan": "standard", "amount": 2000, "from_currency": "GBP", "to_currency": "EUR"},
+                {"plan": "premium", "amount": 5000, "from_currency": "USD", "to_currency": "GBP"},
+                {"plan": "metal", "amount": 10000, "from_currency": "EUR", "to_currency": "USD"},
+            ],
+        },
+    },
+    # ── Revolut X crypto trading tools ───────────────────────────────────────
+    {
+        "name": "get_crypto_tickers",
+        "description": "All available trading pairs on Revolut X exchange (requires REVOLUT_X_API_KEY)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    {
+        "name": "get_crypto_orders",
+        "description": "List all active/open orders on your Revolut X account",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "examples": [{}],
+        },
+    },
+    {
+        "name": "place_crypto_order",
+        "description": "Place a market or limit order on Revolut X (requires REVOLUT_X_API_KEY + REVOLUT_X_PRIVATE_KEY)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Trading pair e.g. BTC-USD"},
+                "side": {"type": "string", "enum": ["buy", "sell"]},
+                "order_type": {"type": "string", "enum": ["market", "limit"]},
+                "quantity": {"type": "number", "description": "Amount of base asset"},
+                "price": {"type": "number", "description": "Limit price — required for limit orders, omit for market"},
+            },
+            "required": ["symbol", "side", "order_type", "quantity"],
+            "examples": [
+                {"symbol": "BTC-USD", "side": "buy", "order_type": "limit", "quantity": 0.01, "price": 60000},
+                {"symbol": "ETH-USD", "side": "buy", "order_type": "market", "quantity": 0.5},
+                {"symbol": "SOL-USD", "side": "sell", "order_type": "limit", "quantity": 10, "price": 155},
+            ],
+        },
+    },
+    {
+        "name": "get_crypto_trades",
+        "description": "Trade history on your Revolut X account, optionally filtered by symbol",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Filter to a specific trading pair e.g. BTC-USD"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "examples": [
+                {},
+                {"symbol": "BTC-USD", "limit": 25},
+                {"symbol": "ETH-USD"},
+            ],
+        },
+    },
+    {
+        "name": "get_crypto_ohlc",
+        "description": "OHLCV candlestick data from Revolut X for charting and analysis",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Trading pair e.g. BTC-USD"},
+                "interval": {"type": "string", "default": "1h", "description": "Candle interval: 1m 5m 15m 1h 4h 1d"},
+                "limit": {"type": "integer", "default": 100, "description": "Number of candles (max 500)"},
+            },
+            "required": ["symbol"],
+            "examples": [
+                {"symbol": "BTC-USD", "interval": "1h", "limit": 48},
+                {"symbol": "ETH-USD", "interval": "4h", "limit": 30},
+                {"symbol": "SOL-USD", "interval": "1d", "limit": 90},
+            ],
+        },
+    },
+    # ── Alert & webhook tools ────────────────────────────────────────────────
+    {
+        "name": "create_alert",
+        "description": "Create a price alert — triggers when ticker crosses target in specified direction",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alert_type": {"type": "string", "description": "price | insider | volume"},
+                "target": {"type": "number", "description": "Threshold value (price, volume, etc.)"},
+                "direction": {"type": "string", "enum": ["above", "below"], "default": "above"},
+                "ticker": {"type": "string", "description": "Stock or crypto symbol"},
+                "user_id": {"type": "string", "default": "default"},
+            },
+            "required": ["alert_type", "target"],
+            "examples": [
+                {"alert_type": "price", "ticker": "NVDA", "target": 1000, "direction": "above"},
+                {"alert_type": "price", "ticker": "BTC", "target": 50000, "direction": "below"},
+                {"alert_type": "insider", "ticker": "AAPL", "target": 1, "direction": "above"},
+            ],
+        },
+    },
+    {
+        "name": "list_alerts",
+        "description": "List all active price/insider alerts for a user",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "default": "default"},
+            },
+            "examples": [
+                {},
+                {"user_id": "user_42"},
+            ],
+        },
+    },
+    {
+        "name": "delete_alert",
+        "description": "Delete a price or insider alert by its ID",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "alert_id": {"type": "string", "description": "Alert ID from list_alerts"},
+            },
+            "required": ["alert_id"],
+            "examples": [
+                {"alert_id": "alert_abc123"},
+            ],
+        },
+    },
+    {
+        "name": "register_webhook",
+        "description": "Register a webhook URL to receive real-time event notifications",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "HTTPS endpoint that accepts POST JSON payloads"},
+                "events": {"type": "array", "items": {"type": "string"}, "description": "Event types to subscribe to"},
+            },
+            "required": ["url"],
+            "examples": [
+                {"url": "https://myapp.com/hooks/mcp", "events": ["price_alert", "insider_trade"]},
+                {"url": "https://myapp.com/hooks/mcp", "events": ["insider_cluster"]},
+            ],
+        },
+    },
 ]
+
+# ── Apply TOOLS_MODE filter ────────────────────────────────────────────────
+# Filter both dicts/lists so that HTTP (FastAPI) and stdio (FastMCP) transports
+# expose only the tools appropriate for this deployment.
+if TOOLS_MODE == "market":
+    TOOL_HANDLERS = {k: v for k, v in TOOL_HANDLERS.items() if k in MARKET_TOOL_NAMES}
+    MCP_TOOLS_SCHEMA = [t for t in MCP_TOOLS_SCHEMA if t["name"] in MARKET_TOOL_NAMES]
+elif TOOLS_MODE == "revolut":
+    TOOL_HANDLERS = {k: v for k, v in TOOL_HANDLERS.items() if k in REVOLUT_TOOL_NAMES}
+    MCP_TOOLS_SCHEMA = [t for t in MCP_TOOLS_SCHEMA if t["name"] in REVOLUT_TOOL_NAMES]
+# TOOLS_MODE=all (default): no filtering, all 38 tools exposed
 
 # Register filtered tools with FastMCP for stdio transport
 for _name, _func in TOOL_HANDLERS.items():
@@ -591,216 +1133,217 @@ for _name, _func in TOOL_HANDLERS.items():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PROMPTS — MARKET (13)  registered when TOOLS_MODE=market or all
+#  PROMPTS  (17)
 # ══════════════════════════════════════════════════════════════════════════════
 
-if TOOLS_MODE in ("market", "all"):
-
-    @mcp.prompt()
-    def revolut_insider_scan(ticker: str = "NVDA") -> str:
-        return (
-            f"Check the latest insider filings for {ticker.upper()} using get_insider_filings(ticker='{ticker}') "
-            f"then check its price with revolut_price_check(ticker='{ticker}'). "
-            f"Summarise: total filings, total value, any CEO/CFO trades, and whether it's on Revolut."
-        )
-
-    @mcp.prompt()
-    def weekly_insider_report() -> str:
-        return (
-            "Call get_insider_weekly_summary(). "
-            "Format as a structured report: top 3 tickers by total value, CEO/CFO count, "
-            "Revolut tradable count, and a 1-line actionable recommendation for each."
-        )
-
-    @mcp.prompt()
-    def market_watchlist_snapshot() -> str:
-        return (
-            "Call price_snapshot(). Interpret the market mood. "
-            "Highlight top gainer and loser. Suggest one Revolut-tradable action based on the data."
-        )
-
-    @mcp.prompt()
-    def revolut_fx_opportunity() -> str:
-        return (
-            "Call get_exchange_rate(base='GBP', targets='EUR,USD') and "
-            "get_revolut_fx_fees(plan='premium', amount=5000). "
-            "Recommend whether today or Monday is better for a 5000 GBP→EUR conversion."
-        )
-
-    @mcp.prompt()
-    def revolut_crypto_alert_setup() -> str:
-        return (
-            "Call get_crypto_price('BTC'). "
-            "Then create two alerts: create_alert('price', target=BTC_price*1.10, direction='above', ticker='BTC') "
-            "and create_alert('price', target=BTC_price*0.90, direction='below', ticker='BTC'). "
-            "Confirm both alert IDs."
-        )
-
-    @mcp.prompt()
-    def insider_cluster_alert() -> str:
-        return (
-            "Call get_insider_clusters(days=7). "
-            "Filter for clusters with total_value >= 1,000,000. "
-            "For each match, check revolut_price_check(ticker). "
-            "Output as a trading watchlist with 🚨 emoji for CEO/CFO involvement."
-        )
-
-    @mcp.prompt()
-    def daily_market_briefing() -> str:
-        return (
-            "60-second market briefing: "
-            "1) price_snapshot() — mood + top mover "
-            "2) crypto_top_movers(limit=3) — hottest crypto "
-            "3) get_insider_clusters(days=1) — any fresh clusters "
-            "Format as a TL;DR paragraph under 100 words."
-        )
-
-    @mcp.prompt()
-    def revolut_trading_signal() -> str:
-        return (
-            "Call cross_reference_insider_revolut(limit=50). "
-            "Filter for CEO/CFO trades. "
-            "For each, call revolut_price_check(ticker). "
-            "Output a ranked signal list: ticker, insider role, trade value, current price, Revolut ✅/❌."
-        )
-
-    @mcp.prompt()
-    def seo_finance_content_ideas() -> str:
-        return (
-            "Call get_insider_clusters() and crypto_top_movers(). "
-            "Generate 10 SEO blog post titles using the data. "
-            "Include search intent (informational vs transactional) and a target keyword for each."
-        )
-
-    @mcp.prompt()
-    def competitor_insider_analysis(ticker: str = "NVDA", competitor: str = "AMD") -> str:
-        return (
-            f"Compare insider trades: get_insider_filings('{ticker}') vs get_insider_filings('{competitor}'). "
-            f"Also pull prices: revolut_price_check('{ticker}') and revolut_price_check('{competitor}'). "
-            f"Write a 200-word competitor analysis blog intro."
-        )
-
-    @mcp.prompt()
-    def daily_trading_thread() -> str:
-        return (
-            "Create a 5-tweet Twitter/X thread from today's market data. "
-            "Use price_snapshot() for market mood, crypto_top_movers(limit=2) for crypto, "
-            "and get_insider_clusters() for a 🚨 insider alert tweet. "
-            "Each tweet max 280 chars. Include tickers with $ prefix."
-        )
-
-    @mcp.prompt()
-    def crypto_seo_topic_discovery() -> str:
-        return (
-            "Call crypto_top_movers(limit=20). "
-            "For each top gainer check get_crypto_price(symbol). "
-            "Generate SEO H1 titles, meta descriptions, and FAQ questions for the top 5 movers."
-        )
-
-    @mcp.prompt()
-    def seo_weekly_finance_newsletter() -> str:
-        return (
-            "Generate a complete weekly finance newsletter: "
-            "Subject line, 3-sentence intro using price_snapshot() data, "
-            "top insider cluster story from get_insider_clusters(), "
-            "crypto highlight from crypto_top_movers(limit=3), "
-            "and a CTA to trade on Revolut. Target 300 words."
-        )
+@mcp.prompt()
+def revolut_insider_scan(ticker: str = "NVDA") -> str:
+    return (
+        f"Check the latest insider filings for {ticker.upper()} using get_insider_filings(ticker='{ticker}') "
+        f"then check its price with revolut_price_check(ticker='{ticker}'). "
+        f"Summarise: total filings, total value, any CEO/CFO trades, and whether it's on Revolut."
+    )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PROMPTS — REVOLUT BANKING (4)  registered when TOOLS_MODE=revolut or all
-# ══════════════════════════════════════════════════════════════════════════════
-
-if TOOLS_MODE in ("revolut", "all"):
-
-    @mcp.prompt()
-    def account_overview() -> str:
-        return "Call get_accounts() and get_multi_currency_balances(). Summarise all balances and net worth."
-
-    @mcp.prompt()
-    def revolut_portfolio_health() -> str:
-        return (
-            "Call get_accounts(), get_pockets(), and get_spending_by_category() for the current month. "
-            "Give a financial health score 1–10, top spending categories, and 3 actionable tips."
-        )
-
-    @mcp.prompt()
-    def revolut_upcoming_payments() -> str:
-        return (
-            "Call get_scheduled_payments() and get_account_balance(). "
-            "List upcoming payments sorted by date. "
-            "Warn if any payment would overdraw the current balance."
-        )
-
-    @mcp.prompt()
-    def revolut_savings_goal_tracker() -> str:
-        return (
-            "Call get_pockets(). For each vault with a goal set, "
-            "calculate weekly savings needed to hit the goal by the target date. "
-            "Suggest which ETF on Revolut could grow the savings faster."
-        )
+@mcp.prompt()
+def weekly_insider_report() -> str:
+    return (
+        "Call get_insider_weekly_summary(). "
+        "Format as a structured report: top 3 tickers by total value, CEO/CFO count, "
+        "Revolut tradable count, and a 1-line actionable recommendation for each."
+    )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  RESOURCES — MARKET (4)  registered when TOOLS_MODE=market or all
-# ══════════════════════════════════════════════════════════════════════════════
+@mcp.prompt()
+def market_watchlist_snapshot() -> str:
+    return (
+        "Call price_snapshot(). Interpret the market mood. "
+        "Highlight top gainer and loser. Suggest one Revolut-tradable action based on the data."
+    )
 
-if TOOLS_MODE in ("market", "all"):
 
-    @mcp.resource("revolut://tradable/symbols")
-    def revolut_tradable_symbols() -> str:
-        return json.dumps({
-            "stocks": sorted(revolut.REVOLUT_STOCKS.keys()),
-            "crypto": sorted(revolut.REVOLUT_CRYPTO),
-            "total": len(revolut.REVOLUT_STOCKS) + len(revolut.REVOLUT_CRYPTO),
-        })
+@mcp.prompt()
+def account_overview() -> str:
+    return "Call get_accounts() and get_multi_currency_balances(). Summarise all balances and net worth."
 
-    @mcp.resource("revolut://tradable/etfs-by-sector")
-    def revolut_etf_sectors() -> str:
-        return json.dumps(revolut.get_etf_sectors())
 
-    @mcp.resource("seo://financial-keywords")
-    def seo_financial_keywords() -> str:
-        year = datetime.now().year
-        return json.dumps([
-            "best stocks to buy on Revolut",
-            f"crypto price prediction {year}",
-            "Revolut stock list",
-            "how to buy ETF on Revolut",
-            "insider trading alerts",
-            "Revolut vs eToro fees",
-            "top crypto gainers today",
-            "SEC Form 4 filings alert",
-        ])
+@mcp.prompt()
+def revolut_portfolio_health() -> str:
+    return (
+        "Call get_accounts(), get_pockets(), and get_spending_by_category() for the current month. "
+        "Give a financial health score 1–10, top spending categories, and 3 actionable tips."
+    )
 
-    @mcp.resource("seo://blog-post-template")
-    def seo_blog_post_template() -> str:
-        return json.dumps({
-            "title_formula": "[TICKER] Insider Buying Alert – [DATE]",
-            "meta_description_formula": "CEO/CFO insiders bought [VALUE] of [TICKER] stock. Is it available on Revolut?",
-            "structure": [
-                "H1: What happened (insider event)",
-                "H2: Why it matters (signal strength)",
-                "H2: Is [TICKER] on Revolut?",
-                "H2: How to trade it (step-by-step)",
-                "FAQ: 3 questions",
-            ],
-            "word_count_target": 800,
-            "cta": "Start trading on Revolut today",
-        })
+
+@mcp.prompt()
+def revolut_fx_opportunity() -> str:
+    return (
+        "Call get_exchange_rate(base='GBP', targets='EUR,USD') and "
+        "get_revolut_fx_fees(plan='premium', amount=5000). "
+        "Recommend whether today or Monday is better for a 5000 GBP→EUR conversion."
+    )
+
+
+@mcp.prompt()
+def revolut_crypto_alert_setup() -> str:
+    return (
+        "Call get_crypto_price('BTC'). "
+        "Then create two alerts: create_alert('price', target=BTC_price*1.10, direction='above', ticker='BTC') "
+        "and create_alert('price', target=BTC_price*0.90, direction='below', ticker='BTC'). "
+        "Confirm both alert IDs."
+    )
+
+
+@mcp.prompt()
+def revolut_upcoming_payments() -> str:
+    return (
+        "Call get_scheduled_payments() and get_account_balance(). "
+        "List upcoming payments sorted by date. "
+        "Warn if any payment would overdraw the current balance."
+    )
+
+
+@mcp.prompt()
+def insider_cluster_alert() -> str:
+    return (
+        "Call get_insider_clusters(days=7). "
+        "Filter for clusters with total_value >= 1,000,000. "
+        "For each match, check revolut_price_check(ticker). "
+        "Output as a trading watchlist with 🚨 emoji for CEO/CFO involvement."
+    )
+
+
+@mcp.prompt()
+def daily_market_briefing() -> str:
+    return (
+        "60-second market briefing: "
+        "1) price_snapshot() — mood + top mover "
+        "2) crypto_top_movers(limit=3) — hottest crypto "
+        "3) get_insider_clusters(days=1) — any fresh clusters "
+        "Format as a TL;DR paragraph under 100 words."
+    )
+
+
+@mcp.prompt()
+def revolut_savings_goal_tracker() -> str:
+    return (
+        "Call get_pockets(). For each vault with a goal set, "
+        "calculate weekly savings needed to hit the goal by the target date. "
+        "Suggest which ETF on Revolut could grow the savings faster."
+    )
+
+
+@mcp.prompt()
+def revolut_trading_signal() -> str:
+    return (
+        "Call cross_reference_insider_revolut(limit=50). "
+        "Filter for CEO/CFO trades. "
+        "For each, call revolut_price_check(ticker). "
+        "Output a ranked signal list: ticker, insider role, trade value, current price, Revolut ✅/❌."
+    )
+
+
+@mcp.prompt()
+def seo_finance_content_ideas() -> str:
+    return (
+        "Call get_insider_clusters() and crypto_top_movers(). "
+        "Generate 10 SEO blog post titles using the data. "
+        "Include search intent (informational vs transactional) and a target keyword for each."
+    )
+
+
+@mcp.prompt()
+def competitor_insider_analysis(ticker: str = "NVDA", competitor: str = "AMD") -> str:
+    return (
+        f"Compare insider trades: get_insider_filings('{ticker}') vs get_insider_filings('{competitor}'). "
+        f"Also pull prices: revolut_price_check('{ticker}') and revolut_price_check('{competitor}'). "
+        f"Write a 200-word competitor analysis blog intro."
+    )
+
+
+@mcp.prompt()
+def daily_trading_thread() -> str:
+    return (
+        "Create a 5-tweet Twitter/X thread from today's market data. "
+        "Use price_snapshot() for market mood, crypto_top_movers(limit=2) for crypto, "
+        "and get_insider_clusters() for a 🚨 insider alert tweet. "
+        "Each tweet max 280 chars. Include tickers with $ prefix."
+    )
+
+
+@mcp.prompt()
+def crypto_seo_topic_discovery() -> str:
+    return (
+        "Call crypto_top_movers(limit=20). "
+        "For each top gainer check get_crypto_price(symbol). "
+        "Generate SEO H1 titles, meta descriptions, and FAQ questions for the top 5 movers."
+    )
+
+
+@mcp.prompt()
+def seo_weekly_finance_newsletter() -> str:
+    return (
+        "Generate a complete weekly finance newsletter: "
+        "Subject line, 3-sentence intro using price_snapshot() data, "
+        "top insider cluster story from get_insider_clusters(), "
+        "crypto highlight from crypto_top_movers(limit=3), "
+        "and a CTA to trade on Revolut. Target 300 words."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  RESOURCES — REVOLUT BANKING (1)  registered when TOOLS_MODE=revolut or all
+#  RESOURCES  (5)
 # ══════════════════════════════════════════════════════════════════════════════
 
-if TOOLS_MODE in ("revolut", "all"):
+@mcp.resource("revolut://tradable/symbols")
+def revolut_tradable_symbols() -> str:
+    return json.dumps({
+        "stocks": sorted(revolut.REVOLUT_STOCKS.keys()),
+        "crypto": sorted(revolut.REVOLUT_CRYPTO),
+        "total": len(revolut.REVOLUT_STOCKS) + len(revolut.REVOLUT_CRYPTO),
+    })
 
-    @mcp.resource("revolut://plan-limits")
-    def revolut_plan_limits() -> str:
-        return json.dumps({
-            "standard": {"monthly_fx_limit_gbp": 1000, "stock_fee_pct": 1.49, "crypto_fee_pct": 1.49},
-            "premium": {"monthly_fx_limit_gbp": 10000, "stock_fee_pct": 0.49, "crypto_fee_pct": 1.49},
-            "metal": {"monthly_fx_limit_gbp": "unlimited", "stock_fee_pct": 0.0, "crypto_fee_pct": 1.49},
-        })
+
+@mcp.resource("revolut://plan-limits")
+def revolut_plan_limits() -> str:
+    return json.dumps({
+        "standard": {"monthly_fx_limit_gbp": 1000, "stock_fee_pct": 1.49, "crypto_fee_pct": 1.49},
+        "premium": {"monthly_fx_limit_gbp": 10000, "stock_fee_pct": 0.49, "crypto_fee_pct": 1.49},
+        "metal": {"monthly_fx_limit_gbp": "unlimited", "stock_fee_pct": 0.0, "crypto_fee_pct": 1.49},
+    })
+
+
+@mcp.resource("revolut://tradable/etfs-by-sector")
+def revolut_etf_sectors() -> str:
+    return json.dumps(revolut.get_etf_sectors())
+
+
+@mcp.resource("seo://financial-keywords")
+def seo_financial_keywords() -> str:
+    return json.dumps([
+        "best stocks to buy on Revolut",
+        "crypto price prediction 2025",
+        "Revolut stock list",
+        "how to buy ETF on Revolut",
+        "insider trading alerts",
+        "Revolut vs eToro fees",
+        "top crypto gainers today",
+        "SEC Form 4 filings alert",
+    ])
+
+
+@mcp.resource("seo://blog-post-template")
+def seo_blog_post_template() -> str:
+    return json.dumps({
+        "title_formula": "[TICKER] Insider Buying Alert – [DATE]",
+        "meta_description_formula": "CEO/CFO insiders bought [VALUE] of [TICKER] stock. Is it available on Revolut?",
+        "structure": [
+            "H1: What happened (insider event)",
+            "H2: Why it matters (signal strength)",
+            "H2: Is [TICKER] on Revolut?",
+            "H2: How to trade it (step-by-step)",
+            "FAQ: 3 questions",
+        ],
+        "word_count_target": 800,
+        "cta": "Start trading on Revolut today",
+    })
