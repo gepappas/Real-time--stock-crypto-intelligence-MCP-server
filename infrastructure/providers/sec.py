@@ -14,6 +14,7 @@ import httpx
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 from typing import List, Optional
 from infrastructure.cache import cache_get, cache_set
@@ -96,8 +97,134 @@ async def _sec_get_with_retry(url: str, headers: dict, max_retries: int = 3) -> 
     return None
 
 
+async def _fetch_form4_xml(accession_id: str) -> Optional[dict]:
+    """
+    Fetch and parse a Form 4 XML filing from EDGAR.
+
+    accession_id is the EDGAR accession number in dashed format as returned in
+    the EFTS Elasticsearch _id field: e.g. '0001234567-24-000001'.
+
+    Returns a dict of parsed Form 4 fields, or None on any failure.
+
+    Two-step:
+      1. Fetch the filing index page to locate the primary Form 4 XML document.
+      2. Fetch and parse that XML.
+
+    Both requests share the existing _sec_get_with_retry backoff/rate-limit.
+    """
+    parts = accession_id.split("-")
+    if len(parts) != 3:
+        return None
+
+    cik_int = int(parts[0])          # strip leading zeros for the URL path
+    accession_nodash = accession_id.replace("-", "")
+    index_url = (
+        f"https://www.sec.gov/Archives/edgar/data/{cik_int}"
+        f"/{accession_nodash}/{accession_id}-index.htm"
+    )
+
+    # Step 1: filing index page → find the primary XML document URL
+    r = await _sec_get_with_retry(index_url, SEC_HEADERS_BASE)
+    if not r or r.status_code != 200:
+        logger.debug("Form 4 index page unavailable: %s", index_url)
+        return None
+
+    soup = BeautifulSoup(r.text, "lxml")
+    form4_url = None
+    for row in soup.select("table tr"):
+        cells = row.find_all("td")
+        # Filing index table: [sequence, description, document, type, size]
+        # Look for the row whose type cell contains "4"
+        if len(cells) >= 4:
+            doc_type = cells[3].get_text(strip=True)
+            if doc_type == "4":
+                link = cells[2].find("a")
+                if link and link.get("href"):
+                    href = link["href"]
+                    form4_url = (
+                        href if href.startswith("http")
+                        else f"https://www.sec.gov{href}"
+                    )
+                    break
+
+    if not form4_url:
+        logger.debug("No Form 4 XML link found in index: %s", index_url)
+        return None
+
+    # Step 2: fetch and parse the Form 4 XML
+    r = await _sec_get_with_retry(form4_url, {**SEC_HEADERS_BASE, "Accept": "text/xml,application/xml"})
+    if not r or r.status_code != 200:
+        logger.debug("Form 4 XML fetch failed: %s", form4_url)
+        return None
+
+    try:
+        xml = BeautifulSoup(r.text, "lxml-xml")
+
+        def text(tag: str, default: str = "") -> str:
+            node = xml.find(tag)
+            return node.get_text(strip=True) if node else default
+
+        def float_text(tag: str) -> float:
+            node = xml.find(tag)
+            if node:
+                val_node = node.find("value")
+                raw = val_node.get_text(strip=True) if val_node else node.get_text(strip=True)
+                try:
+                    return float(raw.replace(",", ""))
+                except ValueError:
+                    pass
+            return 0.0
+
+        ticker = text("issuerTradingSymbol").upper()
+        if not ticker:
+            return None  # malformed filing — skip
+
+        officer_title = text("officerTitle")
+        acq_disp = xml.find("transactionAcquiredDisposedCode")
+        acq_val = acq_disp.find("value").get_text(strip=True) if (acq_disp and acq_disp.find("value")) else "A"
+
+        shares = float_text("transactionShares")
+        price  = float_text("transactionPricePerShare")
+
+        return {
+            "ticker":         ticker,
+            "insider_name":   text("rptOwnerName", "Unknown"),
+            "officer_title":  officer_title,
+            "is_director":    text("isDirector") == "1",
+            "is_officer":     text("isOfficer") == "1",
+            "transaction_type": "Buy" if acq_val == "A" else "Sell",
+            "shares":         shares,
+            "price":          price,
+            "value":          round(shares * price, 2),
+            "period":         text("periodOfReport"),
+        }
+    except Exception as exc:
+        logger.warning("Form 4 XML parse error (%s): %s", form4_url, exc)
+        return None
+
+
 async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 25) -> List[InsiderTrade]:
-    """Fetch Form 4 insider filings from SEC EDGAR (primary + fallback)."""
+    """
+    Fetch Form 4 insider filings from SEC EDGAR.
+
+    Bugs fixed vs previous version:
+    - Bug 1: Was POSTing JSON to EDGAR EFTS. EDGAR EFTS is a GET-only endpoint;
+      POST returns 405, silently swallowed → 0 trades from primary.
+    - Bug 2: _source field names (issuerTradingSymbol, transactionValue, …) are
+      Form 4 XML element names, NOT EDGAR EFTS index fields. EFTS _source is
+      filing metadata (entity_name, file_date, period_of_report). Every field
+      read as "" or {} → InsiderTrade.ticker = "" → never in REVOLUT_STOCKS.
+      Fix: get accession ID from EFTS hit, fetch actual Form 4 XML, parse real
+      fields via _fetch_form4_xml().
+    - Bug 3: Fallback Atom title "4 - JOHN DOE (0001234567) (Reporting)" — the
+      parenthesised value is the REPORTER'S CIK, not a ticker. split("(")[-1]
+      extracted "Reporting" for every entry.
+    - Bug 4: html.parser on Atom XML. xml tags are case-sensitive; html.parser
+      lowercases in HTML mode, making find_all("entry") unreliable on
+      application/atom+xml. Fix: lxml-xml parser.
+    - Bug 5: Fallback always set is_ceo_cfo=False because title="" for every
+      fallback trade. Fix: officer title now parsed from Form 4 XML.
+    """
     key = f"sec:insider:{ticker or 'all'}:{limit}"
     cached = await cache_get(key)
     if cached:
@@ -108,54 +235,72 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
 
     trades: List[InsiderTrade] = []
 
-    # ── Primary: EDGAR full-text search ──────────────────────────────────
+    # ── Primary: EDGAR EFTS full-text search (GET) ───────────────────────
+    # The EDGAR EFTS endpoint only accepts GET with query params.
+    # POST with a JSON body returns 405; silently swallowed by the retry helper
+    # → 0 hits from primary every time.
     try:
-        query = 'formType:"4"'
-        if ticker:
-            query += f' AND issuerTradingSymbol:{ticker.upper()}'
-        payload = {
-            "q": query,
+        qs: dict = {
+            "forms": "4",
             "dateRange": "custom",
             "startdt": (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d"),
             "enddt": datetime.now().strftime("%Y-%m-%d"),
-            "from": 0,
-            "size": limit,
-            "sort": {"filedAt": {"order": "desc"}},
+            "from": "0",
+            "size": str(limit),
         }
-        r = await _sec_post_with_retry(
-            "https://efts.sec.gov/LATEST/search-index",
-            payload,
-            {**SEC_HEADERS_BASE, "Content-Type": "application/json"},
-        )
+        if ticker:
+            qs["q"] = f'issuerTradingSymbol:{ticker.upper()}'
+        url = "https://efts.sec.gov/LATEST/search-index?" + urlencode(qs)
+
+        r = await _sec_get_with_retry(url, {**SEC_HEADERS_BASE, "Accept": "application/json"})
         if r:
             data = r.json()
             hits = data.get("hits", {}).get("hits", [])
-            for hit in hits:
+            if hits:
+                logger.info("EFTS first _source keys: %s", list(hits[0].get("_source", {}).keys()))
+
+            # EFTS _source has filing metadata, NOT Form 4 XML parsed fields.
+            # Fetch the actual Form 4 XML for each hit to get real ticker + data.
+            sem = asyncio.Semaphore(5)  # max 5 concurrent SEC requests
+
+            async def _primary_fetch(hit: dict) -> Optional[InsiderTrade]:
+                accession = hit.get("_id", "")
                 src = hit.get("_source", {})
-                rel = src.get("reportingOwnerRelationship", {})
-                title = rel.get("officerTitle", "")
-                trade = InsiderTrade(
-                    ticker=src.get("issuerTradingSymbol", "").upper(),
-                    insider_name=src.get("reportingOwnerName", "Unknown"),
+                filing_date = (src.get("file_date") or src.get("filed_at") or "")[:10]
+                async with sem:
+                    details = await _fetch_form4_xml(accession)
+                if not details:
+                    return None
+                title = details["officer_title"]
+                return InsiderTrade(
+                    ticker=details["ticker"],
+                    insider_name=details["insider_name"],
                     title=title,
-                    transaction_type=src.get("transactionType", "Buy"),
-                    value=src.get("transactionValue", {}).get("value", 0) or 0,
-                    shares=src.get("transactionShares", {}).get("value", 0) or 0,
-                    price_per_share=src.get("transactionPricePerShare", {}).get("value", 0) or 0,
+                    transaction_type=details["transaction_type"],
+                    value=details["value"],
+                    shares=details["shares"],
+                    price_per_share=details["price"],
                     is_ceo_cfo=any(kw in title.upper() for kw in ["CEO", "CFO", "CHIEF EXECUTIVE", "CHIEF FINANCIAL"]),
-                    is_director=bool(rel.get("isDirector", False)),
-                    is_officer=bool(rel.get("isOfficer", False)),
-                    transaction_date=src.get("periodOfReport", ""),
-                    filing_date=src.get("filedAt", "")[:10] if src.get("filedAt") else "",
+                    is_director=details["is_director"],
+                    is_officer=details["is_officer"],
+                    transaction_date=details["period"],
+                    filing_date=filing_date,
                 )
-                trades.append(trade)
+
+            results = await asyncio.gather(*[_primary_fetch(h) for h in hits], return_exceptions=True)
+            trades = [t for t in results if isinstance(t, InsiderTrade)]
             logger.info("SEC primary returned %d trades for %s", len(trades), ticker or "all")
         else:
-            logger.warning("SEC primary failed after all retries for %s", ticker or "all")
+            logger.warning("SEC primary request failed for %s", ticker or "all")
     except Exception as exc:
         logger.warning("SEC primary exception for %s: %s", ticker or "all", exc)
 
     # ── Fallback: RSS/ATOM browse-edgar ──────────────────────────────────
+    # The Atom feed title is "4 - JOHN DOE (CIK) (Reporting)" — no ticker.
+    # The prior code extracted "Reporting" from split("(")[-1], which never
+    # matched any stock.  Fix: parse accession from the entry link, then call
+    # _fetch_form4_xml to get the real ticker, title, and transaction data.
+    # Use lxml-xml (not html.parser) for reliable Atom XML tag discovery.
     if not trades:
         try:
             date_str = datetime.now().strftime("%Y%m%d")
@@ -165,26 +310,58 @@ async def get_recent_insider_trades(ticker: Optional[str] = None, limit: int = 2
             )
             r = await _sec_get_with_retry(url, SEC_HEADERS_BASE)
             if r and r.status_code == 200:
-                soup = BeautifulSoup(r.text, "html.parser")
-                for entry in soup.find_all("entry"):
-                    title_tag = entry.find("title")
-                    title_text = title_tag.text if title_tag else ""
-                    ticker_extracted = (
-                        title_text.split("(")[-1].replace(")", "").strip().upper()
-                        if "(" in title_text else ""
+                # lxml-xml: correct parser for Atom (application/atom+xml)
+                # html.parser lowercases tags in HTML mode — unreliable for XML.
+                soup = BeautifulSoup(r.text, "lxml-xml")
+                entries = soup.find_all("entry")
+                logger.info("SEC fallback Atom: %d entries", len(entries))
+
+                # Extract accession IDs from filing index links, e.g.
+                # https://www.sec.gov/Archives/edgar/data/123/000123-24-001-index.htm
+                # → accession "000123-24-001" → "0-0-0-1-2-3---2-4---0-0-1"... no
+                # Actually EDGAR index links have format:
+                # .../data/{cik}/{accession_nodash}/{accession}-index.htm
+                import re as _re
+                accession_pattern = _re.compile(r"(\d{10}-\d{2}-\d{6})-index\.htm")
+
+                accessions: List[str] = []
+                for entry in entries:
+                    link_tag = entry.find("link")
+                    href = ""
+                    if link_tag:
+                        href = link_tag.get("href") or link_tag.get_text(strip=True)
+                    m = accession_pattern.search(href)
+                    if m:
+                        accessions.append(m.group(1))
+
+                sem = asyncio.Semaphore(5)
+
+                async def _fallback_fetch(accession: str) -> Optional[InsiderTrade]:
+                    async with sem:
+                        details = await _fetch_form4_xml(accession)
+                    if not details:
+                        return None
+                    title = details["officer_title"]
+                    return InsiderTrade(
+                        ticker=details["ticker"],
+                        insider_name=details["insider_name"],
+                        title=title,
+                        transaction_type=details["transaction_type"],
+                        value=details["value"],
+                        shares=details["shares"],
+                        price_per_share=details["price"],
+                        is_ceo_cfo=any(kw in title.upper() for kw in ["CEO", "CFO", "CHIEF EXECUTIVE", "CHIEF FINANCIAL"]),
+                        is_director=details["is_director"],
+                        is_officer=details["is_officer"],
+                        transaction_date=details.get("period"),
+                        filing_date="",
                     )
-                    updated = entry.find("updated")
-                    trades.append(InsiderTrade(
-                        ticker=ticker_extracted,
-                        insider_name="See filing",
-                        title="",
-                        transaction_type="Unknown",
-                        value=0,
-                        filing_date=updated.text[:10] if updated else "",
-                    ))
+
+                results = await asyncio.gather(*[_fallback_fetch(a) for a in accessions], return_exceptions=True)
+                trades = [t for t in results if isinstance(t, InsiderTrade)]
                 logger.info("SEC fallback returned %d trades", len(trades))
             else:
-                logger.warning("SEC fallback failed for %s", ticker or "all")
+                logger.warning("SEC fallback request failed for %s", ticker or "all")
         except Exception as exc:
             logger.warning("SEC fallback exception for %s: %s", ticker or "all", exc)
 
